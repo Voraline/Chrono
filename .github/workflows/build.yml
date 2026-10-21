@@ -1,0 +1,28 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: Build .rbxm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rokit
+        uses: CompeyDev/setup-rokit@v0.1.0
+
+      - name: Build rbxm
+        run: rojo build default.project.json -o chrono.rbxm
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrono-${{ github.sha }}
+          path: chrono.rbxm
+          if-no-files-found: error
+          retention-days: 30
