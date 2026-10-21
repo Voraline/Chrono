@@ -61,7 +61,7 @@ local STARTED = false
 return {
 	Start = function(config: ModuleScript?)
 		if STARTED then
-			warn("Chrono: Already Started. Ignoring subsequent calls.")
+			--warn("Chrono: Already Started. Ignoring subsequent calls.")
 			return
 		end
 		STARTED = true
@@ -75,10 +75,10 @@ return {
 		end
 		Config._Lock()
 		if IS_SERVER and Config._GetConfig("CHECK_NEW_VERSION") then
-			CheckVersion()
+			--CheckVersion()
 		end
 		const currentVersion = Config._GetConfig("__VERSION")
-		print(`Chrono {currentVersion} Started.`)
+		--print(`Chrono {currentVersion} Started.`)
 	end,
 
 	Holder = Holder,
