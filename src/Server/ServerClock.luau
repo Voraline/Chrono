@@ -1,3 +1,4 @@
+--!native
 const Players = game:GetService("Players")
 const Types = require(script.Parent.Parent.Shared.Types)
 
