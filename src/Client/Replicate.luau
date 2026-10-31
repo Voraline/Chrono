@@ -124,7 +124,8 @@ end
 Config._WaitForLock(function()
 	local steppedEntities: { Types.Entity } = {}
 	RunService.Heartbeat:Connect(function(deltaTime: number)
-		steppedEntities = {}
+		local sizeBefore = #steppedEntities
+		table.clear(steppedEntities)
 		Frustum.Update()
 		RenderCache.UpdateAll(deltaTime)
 		LastClockUpdate = os.clock()
@@ -183,6 +184,9 @@ Config._WaitForLock(function()
 		if AmtInterpolations > 60 then
 			TotalInterpolationTime = 0
 			AmtInterpolations = 0
+			if sizeBefore ~= #steppedEntities then
+				steppedEntities = {}
+			end
 		end
 		Sender.Update()
 		Ticker._IncrementGlobalTick()
