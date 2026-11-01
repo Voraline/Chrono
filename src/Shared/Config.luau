@@ -22,6 +22,11 @@ export type Configs =
 	| "WARNING_SEVERITY"
 	| "GRID_UPDATE_INTERVAL"
 	| "GRID_MAX_UPDATE_TIME"
+	| "ROLLBACK_MODE"
+	| "ROLLBACK_SPEED_TOLERANCE"
+	| "ROLLBACK_BANK_TIME"
+	| "ROLLBACK_MIN_BANK"
+	| "ROLLBACK_AIR_MARGIN"
 
 export type SetConfig =
 	("MIN_BUFFER", number) -> ()
@@ -39,6 +44,11 @@ export type SetConfig =
 	& ("WARNING_SEVERITY", WarningLevels) -> ()
 	& ("GRID_UPDATE_INTERVAL", number) -> ()
 	& ("GRID_MAX_UPDATE_TIME", number) -> ()
+	& ("ROLLBACK_MODE", "NONE" | "LOG" | "ENFORCE") -> ()
+	& ("ROLLBACK_SPEED_TOLERANCE", number) -> ()
+	& ("ROLLBACK_BANK_TIME", number) -> ()
+	& ("ROLLBACK_MIN_BANK", number) -> ()
+	& ("ROLLBACK_AIR_MARGIN", number) -> ()
 local LOCKED = false
 const BASE_CONFIG = {
 	__VERSION = "v2.2.3",
@@ -49,6 +59,12 @@ const BASE_CONFIG = {
 
 	GRID_UPDATE_INTERVAL = 0.1,
 	GRID_MAX_UPDATE_TIME = 0.0005,
+
+	ROLLBACK_MODE = "NONE",
+	ROLLBACK_SPEED_TOLERANCE = 1.5,
+	ROLLBACK_BANK_TIME = 3,
+	ROLLBACK_MIN_BANK = 12,
+	ROLLBACK_AIR_MARGIN = 4,
 
 	WARNING_SEVERITY = "MEDIUM", -- "NONE", "LOW", "MEDIUM", "HIGH"
 	DEFAULT_NORMAL_TICK_DISTANCE = 50,
@@ -143,6 +159,7 @@ const CONFIG_OPTIONS = {
 	REPLICATE_DEATHS = PLAYER_FILTERS,
 	REPLICATE_CFRAME_SETTERS = PLAYER_FILTERS,
 	WARNING_SEVERITY = { "NONE", "LOW", "MEDIUM", "HIGH" },
+	ROLLBACK_MODE = { "NONE", "LOG", "ENFORCE" },
 }
 
 const function CheckOption(name: string, value: any, options: { string })

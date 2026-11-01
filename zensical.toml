@@ -72,6 +72,7 @@ nav = [
         { ReplicationRules = "reference/replicationrules.md" },
         { Stats = "reference/stats.md" },
         { Receiver = "reference/receiver.md" },
+        { Rollback = "reference/rollback.md" },
         { ServerClock = "reference/serverclock.md" },
         { EntityGrid = "reference/entitygrid.md"}
         

@@ -774,6 +774,9 @@ function Entity.SetCFrame(self: Entity, cframe: CFrame)
 		error(`Chrono: Entity.SetCFrame expected a CFrame, got {typeof(cframe)}`, 2)
 	end
 	const latestTime = (self.latestTime or 0) + 0.00002
+	if IS_SERVER then
+		self._setAt = os.clock()
+	end
 	if Config.FLAGS.SET_CFRAME_FIX then
 		if IS_SERVER or self.networkOwner then
 			self._teleport = os.clock()

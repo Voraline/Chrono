@@ -246,6 +246,7 @@ export type Entity = {
 	lastReplicatedTime: number?,
 	lastClientClock: number?,
 	_teleport: number?,
+	_setAt: number?,
 
 	-- Ticking (Server)
 	autoUpdatePosition: boolean,

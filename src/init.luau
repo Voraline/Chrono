@@ -6,6 +6,7 @@ const HTTPS = game:GetService("HttpService")
 const Stats = require(script.Shared.Stats)
 const Player = require(script.Server.Player)
 const Receiver = require(script.Server.Receiver)
+const Rollback = require(script.Server.Rollback)
 const ServerClock = require(script.Server.ServerClock)
 const Entity = require(script.Shared.Entity)
 const Events = require(script.Shared.Events)
@@ -92,5 +93,6 @@ return {
 	ServerClock = ServerClock,
 	Player = Player,
 	ServerReceiver = Receiver,
+	Rollback = Rollback,
 	EntityGrid = EntityGrid,
 }
