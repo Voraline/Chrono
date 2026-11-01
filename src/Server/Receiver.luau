@@ -135,10 +135,6 @@ const function HandleEntity(
 		return
 	end
 
-	if Rollback.Filter(entity, cframe) then
-		return
-	end
-
 	const teleportTime = entity._teleport
 	const ping = math.max(player:GetNetworkPing(), 0) + 0.05
 
@@ -155,6 +151,10 @@ const function HandleEntity(
 	end
 
 	if entity.lastClientClock and clientClock < entity.lastClientClock then
+		return
+	end
+
+	if Rollback.Filter(player, entity, cframe, serverClock) then
 		return
 	end
 

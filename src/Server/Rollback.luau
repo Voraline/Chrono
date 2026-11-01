@@ -238,6 +238,17 @@ const function Violate(
 	state.attempts = 1
 end
 
+const function SyncTeleport(entity: Entity, state: State, fallback: CFrame, now: number): ()
+	if entity._setAt == state.setStamp then
+		return
+	end
+	state.setStamp = entity._setAt
+	state.pending = entity.latestCFrame or fallback
+	state.pendingUntil = now + TELEPORT_WINDOW
+	state.reapply = false
+	state.attempts = 0
+end
+
 const function Step(player: Player, entity: Entity, now: number): ()
 	const cframe: CFrame? = Observe(entity)
 	if not cframe then
@@ -254,13 +265,7 @@ const function Step(player: Player, entity: Entity, now: number): ()
 	state.time = now
 	const position: Vector3 = cframe.Position
 
-	if entity._setAt ~= state.setStamp then
-		state.setStamp = entity._setAt
-		state.pending = entity.latestCFrame or cframe
-		state.pendingUntil = now + TELEPORT_WINDOW
-		state.reapply = false
-		state.attempts = 0
-	end
+	SyncTeleport(entity, state, cframe, now)
 
 	const pending: CFrame? = state.pending
 	if pending then
@@ -463,19 +468,82 @@ function Rollback.SetMaxSpeed(entity: Entity, speed: number?): ()
 	GetOverride(entity).maxSpeed = speed
 end
 
-function Rollback.Filter(entity: Entity, cframe: CFrame): boolean
+const function Gate(player: Player, entity: Entity, state: State, cframe: CFrame, now: number): boolean
+	const override: Override? = Overrides[entity]
+	if override and now < override.graceUntil then
+		return false
+	end
+	const humanoid: Humanoid? = GetHumanoid(entity, state)
+	if IsExempt(entity, humanoid) then
+		return false
+	end
+	local speed: number? = override and override.maxSpeed
+	if not speed and humanoid then
+		speed = humanoid.WalkSpeed
+	end
+	if not speed then
+		return false
+	end
+
+	const dt: number = math.max(now - state.time, 0)
+	const peak: number = math.max(speed, state.speedPeak * math.max(0, 1 - SPEED_DECAY * dt))
+	const rate: number = peak * SPEED_TOLERANCE
+	const cap: number = rate * BANK_TIME + MIN_BANK
+	const horizontalBank: number = math.min(state.horizontal + rate * dt, cap)
+	const bonus: number = if override and now < override.bonusUntil then override.bonus else 0
+
+	local carry: Vector3 = Vector3.zero
+	const floor: BasePart? = state.floor
+	const floorOffset: Vector3? = state.floorOffset
+	if floor and floorOffset then
+		carry = floor.CFrame:PointToWorldSpace(floorOffset) - state.position
+	end
+
+	const delta: Vector3 = cframe.Position - state.position - carry
+	const flat: number = if humanoid then Vector3.new(delta.X, 0, delta.Z).Magnitude else delta.Magnitude
+	if flat > horizontalBank + bonus then
+		Violate(player, entity, state, cframe, now, "SPEED", flat - horizontalBank - bonus)
+		return true
+	end
+
+	if humanoid then
+		const verticalBank: number = math.min(state.vertical + rate * dt, cap)
+		const gravity: number = workspace.Gravity
+		const launch: number = GetJumpVelocity(humanoid) * JUMP_VELOCITY_TOLERANCE + state.lift
+		const window: number = dt + state.idle
+		const rise: number = launch * window + AIR_MARGIN
+		const fall: number = (launch + gravity * state.airTime) * window + 0.5 * gravity * window * window + AIR_MARGIN
+		const reach: number = math.max(rise, fall, verticalBank) + bonus
+		if math.abs(delta.Y) > reach then
+			Violate(
+				player,
+				entity,
+				state,
+				cframe,
+				now,
+				if delta.Y > 0 then "RISE" else "FALL",
+				math.abs(delta.Y) - reach
+			)
+			return true
+		end
+	end
+	return false
+end
+
+function Rollback.Filter(player: Player, entity: Entity, cframe: CFrame, now: number): boolean
 	if MODE ~= "ENFORCE" then
 		return false
 	end
 	const state: State? = States[entity]
-	if not state then
+	if not state or entity.mountParentId then
 		return false
 	end
+	SyncTeleport(entity, state, state.safe, now)
 	const pending: CFrame? = state.pending
-	if not pending or entity.mountParentId then
-		return false
+	if pending then
+		return (cframe.Position - pending.Position).Magnitude > ACCEPT_RADIUS
 	end
-	return (cframe.Position - pending.Position).Magnitude > ACCEPT_RADIUS
+	return Gate(player, entity, state, cframe, now)
 end
 
 function Rollback.Reset(entity: Entity): ()
