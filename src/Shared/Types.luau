@@ -75,6 +75,7 @@ export type Snapshot<Value, Velocity> = {
 
 	GetLatest: (self: Snapshot<Value, Velocity>) -> SnapshotData<Value, Velocity>?,
 	GetAt: (self: Snapshot<Value, Velocity>, t: number, bypassLock: boolean?) -> Value?,
+	TrimAfter: (self: Snapshot<Value, Velocity>, t: number) -> (),
 	Clear: (self: Snapshot<Value, Velocity>) -> (),
 }
 

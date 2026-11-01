@@ -226,6 +226,20 @@ const function GetAt<Value, Velocity>(self: Snapshot<Value, Velocity>, at: numbe
 	return nil
 end
 
+const function TrimAfter<Value, Velocity>(self: Snapshot<Value, Velocity>, time: number): ()
+	const cache = self.cache
+	const head = self.head
+	local count: number = self.count
+	while count > 0 and cache[GetBufferIndex(head, count)].t > time do
+		count -= 1
+	end
+	self.count = count
+	const stoppedAt: number? = self.stoppedAt
+	if stoppedAt and stoppedAt > time then
+		self.stoppedAt = nil
+	end
+end
+
 const function Clear<Value, Velocity>(self: Snapshot<Value, Velocity>)
 	self.head = 1
 	self.count = 0
@@ -254,6 +268,7 @@ const function New<Value, Velocity>(
 		PushWithCheck = PushWithCheck,
 		GetLatest = GetLatest,
 		GetAt = GetAt,
+		TrimAfter = TrimAfter,
 		Clear = Clear,
 	}
 end

@@ -16,6 +16,7 @@ const Ticker = require(Shared.Ticker)
 const InterpolationMath = require(Shared.InterpolationMath)
 const Warn = require(Shared.Warn)
 const ServerClock = require(script.Parent.ServerClock)
+const Rollback = require(script.Parent.Rollback)
 const Holder = require(Shared.Holder)
 const Entity = require(Shared.Entity)
 const Config = require(Shared.Config)
@@ -131,6 +132,10 @@ const function HandleEntity(
 	const position = cframe.Position
 	const sum = position.X + position.Y + position.Z
 	if sum ~= sum or math.abs(sum) == math.huge then -- NaN or inf
+		return
+	end
+
+	if Rollback.Filter(entity, cframe) then
 		return
 	end
 
