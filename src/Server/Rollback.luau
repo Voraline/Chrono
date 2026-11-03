@@ -1,5 +1,6 @@
 --!native
 const RunService: RunService = game:GetService("RunService")
+const CollectionService: CollectionService = game:GetService("CollectionService")
 
 const Shared = script.Parent.Parent.Shared
 const Config = require(Shared.Config)
@@ -42,6 +43,13 @@ type State = {
 	desynced: boolean,
 }
 
+type ClipCache = {
+	Params: RaycastParams,
+	Model: (Model | BasePart)?,
+	Group: string,
+	Base: { Instance },
+}
+
 const STEP_INTERVAL: number = 1 / 20
 const IDLE_EPSILON: number = 0.01
 const JUMP_POWER_SCALE: number = 1.06
@@ -54,9 +62,16 @@ const TELEPORT_WINDOW: number = 1.5
 const MAX_REAPPLY_ATTEMPTS: number = 4
 const SPEED_DECAY: number = 1
 const MAX_BONUS: number = 500
+const NoclipIgnoreTag: string = "ChronoNoclipIgnore"
+const NoclipMinTravel: number = 0.05
+const NoclipMaxTravel: number = 1024
+const NoclipMinExtent: number = 0.05
+const NoclipTouchEpsilon: number = 0.001
+const NoclipMaxCasts: number = 4
 
 const States: { [Entity]: State } = setmetatable({}, { __mode = "k" }) :: any
 const Overrides: { [Entity]: Override } = setmetatable({}, { __mode = "k" }) :: any
+const ClipCaches: { [Entity]: ClipCache } = setmetatable({}, { __mode = "k" }) :: any
 
 const ViolatedSignal =
 	Signal.new() :: Types.Signal<(player: Player, entity: Entity, kind: string, excess: number) -> (), Player, Entity, string, number>
@@ -66,6 +81,8 @@ local SPEED_TOLERANCE: number = 1.5
 local BANK_TIME: number = 3
 local MIN_BANK: number = 12
 local AIR_MARGIN: number = 4
+local NoclipEnabled: boolean = true
+local NoclipMargin: number = 0.3
 local lastStep: number = 0
 
 const Rollback = {}
@@ -204,6 +221,118 @@ end
 
 const function GetDelay(player: Player): number
 	return REAPPLY_INTERVAL + math.max(player:GetNetworkPing(), 0) * 2
+end
+
+const function IsPartDriven(Target: Entity): boolean
+	return Target.modelReplicationMode == "NATIVE" and not Target._lockedCFReplication
+end
+
+const function GetClipCache(Target: Entity, Root: BasePart): ClipCache
+	const Model: (Model | BasePart)? = Target.model
+	const Existing: ClipCache? = ClipCaches[Target]
+	local Cache: ClipCache
+	if Existing and Existing.Model == Model then
+		Cache = Existing
+	else
+		const Params: RaycastParams = RaycastParams.new()
+		Params.FilterType = Enum.RaycastFilterType.Exclude
+		Params.RespectCanCollide = true
+		Params.IgnoreWater = true
+		const Base: { Instance } = if Model then { Model } else { Root }
+		Params.FilterDescendantsInstances = Base
+		Cache = { Params = Params, Model = Model, Group = Params.CollisionGroup, Base = Base }
+		ClipCaches[Target] = Cache
+	end
+	const Group: string = Root.CollisionGroup
+	if Cache.Group ~= Group then
+		Cache.Params.CollisionGroup = Group
+		Cache.Group = Group
+	end
+	return Cache
+end
+
+const function GetIgnored(Hit: BasePart, Distance: number): { Instance }?
+	if Distance <= NoclipTouchEpsilon then
+		const Touching: { Instance } = { Hit }
+		return Touching
+	end
+	local Node: Instance? = Hit
+	while Node and Node ~= workspace do
+		if
+			CollectionService:HasTag(Node, NoclipIgnoreTag)
+			or (Node:IsA("Model") and Node:FindFirstChildWhichIsA("Humanoid") ~= nil)
+		then
+			const Found: { Instance } = { Node }
+			return Found
+		end
+		Node = Node.Parent
+	end
+	if Hit.Anchored or Hit.AssemblyRootPart.Anchored then
+		return nil
+	end
+	const Ignored: { Instance } = { Hit }
+	for _, Part in Hit:GetConnectedParts(true) do
+		if Part ~= Hit then
+			table.insert(Ignored, Part)
+		end
+	end
+	return Ignored
+end
+
+const function Sweep(Target: Entity, From: Vector3, To: CFrame): number?
+	const Root: BasePart? = Entity.GetPrimaryPart(Target)
+	if not Root then
+		return nil
+	end
+	local Offset: Vector3 = To.Position - From
+	const Travel: number = Offset.Magnitude
+	if Travel < NoclipMinTravel then
+		return nil
+	end
+	if Travel > NoclipMaxTravel then
+		Offset = Offset.Unit * NoclipMaxTravel
+	end
+
+	const Cache: ClipCache = GetClipCache(Target, Root)
+	const Params: RaycastParams = Cache.Params
+	const Inset: number = NoclipMargin * 2
+	const Extents: Vector3 = Root.Size
+	const Size: Vector3 = Vector3.new(
+		math.max(Extents.X - Inset, NoclipMinExtent),
+		math.max(Extents.Y - Inset, NoclipMinExtent),
+		math.max(Extents.Z - Inset, NoclipMinExtent)
+	)
+	const Start: CFrame = To.Rotation + From
+
+	local Excluded: { Instance } = Cache.Base
+	local Dirty: boolean = false
+	local Contact: number? = nil
+	for _ = 1, NoclipMaxCasts do
+		const Result: RaycastResult? = workspace:Blockcast(Start, Size, Offset, Params)
+		if not Result then
+			break
+		end
+		const Hit: BasePart = Result.Instance :: BasePart
+		const Ignored: { Instance }? = GetIgnored(Hit, Result.Distance)
+		if not Ignored then
+			Contact = Result.Distance
+			break
+		end
+		if not Dirty then
+			Excluded = table.clone(Cache.Base)
+			Dirty = true
+		end
+		table.move(Ignored, 1, #Ignored, #Excluded + 1, Excluded)
+		Params.FilterDescendantsInstances = Excluded
+	end
+	if Dirty then
+		Params.FilterDescendantsInstances = Cache.Base
+	end
+
+	if Contact and Contact < Travel then
+		return Travel - Contact
+	end
+	return nil
 end
 
 const function Violate(
@@ -399,6 +528,14 @@ const function Step(player: Player, entity: Entity, now: number): ()
 		end
 	end
 
+	if NoclipEnabled and (MODE ~= "ENFORCE" or IsPartDriven(entity)) then
+		const Penetration: number? = Sweep(entity, state.position, cframe)
+		if Penetration then
+			Violate(player, entity, state, cframe, now, "NOCLIP", Penetration)
+			return
+		end
+	end
+
 	if override and bonusActive then
 		override.bonus = bonus
 	end
@@ -527,6 +664,15 @@ const function Gate(player: Player, entity: Entity, state: State, cframe: CFrame
 			return true
 		end
 	end
+
+	if NoclipEnabled then
+		const Origin: CFrame? = entity.latestCFrame
+		const Penetration: number? = Sweep(entity, if Origin then Origin.Position else state.position, cframe)
+		if Penetration then
+			Violate(player, entity, state, cframe, now, "NOCLIP", Penetration)
+			return true
+		end
+	end
 	return false
 end
 
@@ -564,6 +710,8 @@ Config._WaitForLock(function()
 	BANK_TIME = Config._GetConfig("ROLLBACK_BANK_TIME")
 	MIN_BANK = Config._GetConfig("ROLLBACK_MIN_BANK")
 	AIR_MARGIN = Config._GetConfig("ROLLBACK_AIR_MARGIN")
+	NoclipEnabled = Config._GetConfig("ROLLBACK_NOCLIP")
+	NoclipMargin = Config._GetConfig("ROLLBACK_NOCLIP_MARGIN")
 	RunService.PostSimulation:Connect(Update)
 end)
 

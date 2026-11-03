@@ -27,6 +27,8 @@ export type Configs =
 	| "ROLLBACK_BANK_TIME"
 	| "ROLLBACK_MIN_BANK"
 	| "ROLLBACK_AIR_MARGIN"
+	| "ROLLBACK_NOCLIP"
+	| "ROLLBACK_NOCLIP_MARGIN"
 
 export type SetConfig =
 	("MIN_BUFFER", number) -> ()
@@ -49,6 +51,8 @@ export type SetConfig =
 	& ("ROLLBACK_BANK_TIME", number) -> ()
 	& ("ROLLBACK_MIN_BANK", number) -> ()
 	& ("ROLLBACK_AIR_MARGIN", number) -> ()
+	& ("ROLLBACK_NOCLIP", boolean) -> ()
+	& ("ROLLBACK_NOCLIP_MARGIN", number) -> ()
 local LOCKED = false
 const BASE_CONFIG = {
 	__VERSION = "v2.2.3",
@@ -65,6 +69,8 @@ const BASE_CONFIG = {
 	ROLLBACK_BANK_TIME = 3,
 	ROLLBACK_MIN_BANK = 12,
 	ROLLBACK_AIR_MARGIN = 4,
+	ROLLBACK_NOCLIP = true,
+	ROLLBACK_NOCLIP_MARGIN = 0.3,
 
 	WARNING_SEVERITY = "MEDIUM", -- "NONE", "LOW", "MEDIUM", "HIGH"
 	DEFAULT_NORMAL_TICK_DISTANCE = 50,
