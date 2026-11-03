@@ -251,11 +251,7 @@ const function GetClipCache(Target: Entity, Root: BasePart): ClipCache
 	return Cache
 end
 
-const function GetIgnored(Hit: BasePart, Distance: number): { Instance }?
-	if Distance <= NoclipTouchEpsilon then
-		const Touching: { Instance } = { Hit }
-		return Touching
-	end
+const function GetIgnored(Hit: BasePart): { Instance }?
 	local Node: Instance? = Hit
 	while Node and Node ~= workspace do
 		if
@@ -279,18 +275,16 @@ const function GetIgnored(Hit: BasePart, Distance: number): { Instance }?
 	return Ignored
 end
 
-const function Sweep(Target: Entity, From: Vector3, To: CFrame): number?
+const function Sweep(Target: Entity, From: Vector3, To: CFrame, Fallback: Vector3?): number?
 	const Root: BasePart? = Entity.GetPrimaryPart(Target)
 	if not Root then
 		return nil
 	end
-	local Offset: Vector3 = To.Position - From
-	const Travel: number = Offset.Magnitude
+	local Origin: Vector3 = From
+	local Offset: Vector3 = To.Position - Origin
+	local Travel: number = Offset.Magnitude
 	if Travel < NoclipMinTravel then
 		return nil
-	end
-	if Travel > NoclipMaxTravel then
-		Offset = Offset.Unit * NoclipMaxTravel
 	end
 
 	const Cache: ClipCache = GetClipCache(Target, Root)
@@ -302,18 +296,37 @@ const function Sweep(Target: Entity, From: Vector3, To: CFrame): number?
 		math.max(Extents.Y - Inset, NoclipMinExtent),
 		math.max(Extents.Z - Inset, NoclipMinExtent)
 	)
-	const Start: CFrame = To.Rotation + From
 
 	local Excluded: { Instance } = Cache.Base
 	local Dirty: boolean = false
+	local Restarted: boolean = false
 	local Contact: number? = nil
-	for _ = 1, NoclipMaxCasts do
-		const Result: RaycastResult? = workspace:Blockcast(Start, Size, Offset, Params)
+	local Casts: number = 0
+	while Casts < NoclipMaxCasts do
+		Casts += 1
+		const Direction: Vector3 = if Travel > NoclipMaxTravel then Offset.Unit * NoclipMaxTravel else Offset
+		const Result: RaycastResult? = workspace:Blockcast(To.Rotation + Origin, Size, Direction, Params)
 		if not Result then
 			break
 		end
 		const Hit: BasePart = Result.Instance :: BasePart
-		const Ignored: { Instance }? = GetIgnored(Hit, Result.Distance)
+		local Ignored: { Instance }? = GetIgnored(Hit)
+		if Result.Distance <= NoclipTouchEpsilon then
+			if not Ignored and Fallback and not Restarted then
+				Restarted = true
+				Origin = Fallback
+				Offset = To.Position - Origin
+				Travel = Offset.Magnitude
+				if Travel < NoclipMinTravel then
+					break
+				end
+				continue
+			end
+			if not Ignored then
+				const Touching: { Instance } = { Hit }
+				Ignored = Touching
+			end
+		end
 		if not Ignored then
 			Contact = Result.Distance
 			break
@@ -333,6 +346,10 @@ const function Sweep(Target: Entity, From: Vector3, To: CFrame): number?
 		return Travel - Contact
 	end
 	return nil
+end
+
+const function ClipsPending(Target: Entity, Pending: CFrame, Observed: CFrame, Reapply: boolean): boolean
+	return NoclipEnabled and Reapply and Sweep(Target, Pending.Position, Observed, nil) ~= nil
 end
 
 const function Violate(
@@ -399,7 +416,7 @@ const function Step(player: Player, entity: Entity, now: number): ()
 	const pending: CFrame? = state.pending
 	if pending then
 		const distance: number = (position - pending.Position).Magnitude
-		if distance <= ACCEPT_RADIUS then
+		if distance <= ACCEPT_RADIUS and not ClipsPending(entity, pending, cframe, state.reapply) then
 			Rebase(state, cframe, entity.latestTime or state.safeTime)
 		elseif now >= state.pendingUntil then
 			if state.reapply then
@@ -529,7 +546,7 @@ const function Step(player: Player, entity: Entity, now: number): ()
 	end
 
 	if NoclipEnabled and (MODE ~= "ENFORCE" or IsPartDriven(entity)) then
-		const Penetration: number? = Sweep(entity, state.position, cframe)
+		const Penetration: number? = Sweep(entity, state.position, cframe, state.safe.Position)
 		if Penetration then
 			Violate(player, entity, state, cframe, now, "NOCLIP", Penetration)
 			return
@@ -667,7 +684,8 @@ const function Gate(player: Player, entity: Entity, state: State, cframe: CFrame
 
 	if NoclipEnabled then
 		const Origin: CFrame? = entity.latestCFrame
-		const Penetration: number? = Sweep(entity, if Origin then Origin.Position else state.position, cframe)
+		const Penetration: number? =
+			Sweep(entity, if Origin then Origin.Position else state.position, cframe, state.safe.Position)
 		if Penetration then
 			Violate(player, entity, state, cframe, now, "NOCLIP", Penetration)
 			return true
@@ -688,6 +706,7 @@ function Rollback.Filter(player: Player, entity: Entity, cframe: CFrame, now: nu
 	const pending: CFrame? = state.pending
 	if pending then
 		return (cframe.Position - pending.Position).Magnitude > ACCEPT_RADIUS
+			or ClipsPending(entity, pending, cframe, state.reapply)
 	end
 	return Gate(player, entity, state, cframe, now)
 end
