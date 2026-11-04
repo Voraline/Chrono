@@ -22,6 +22,7 @@ type Override = {
 type State = {
 	time: number,
 	position: Vector3,
+	sweepFrom: Vector3,
 	safe: CFrame,
 	safeTime: number,
 	setStamp: number?,
@@ -174,6 +175,7 @@ const function NewState(entity: Entity, cframe: CFrame, now: number): State
 	return {
 		time = now,
 		position = cframe.Position,
+		sweepFrom = cframe.Position,
 		safe = cframe,
 		safeTime = entity.latestTime or now,
 		setStamp = entity._setAt,
@@ -193,6 +195,7 @@ end
 
 const function Rebase(state: State, cframe: CFrame, time: number): ()
 	state.position = cframe.Position
+	state.sweepFrom = cframe.Position
 	state.safe = cframe
 	state.safeTime = time
 	state.pending = nil
@@ -546,10 +549,13 @@ const function Step(player: Player, entity: Entity, now: number): ()
 	end
 
 	if NoclipEnabled and (MODE ~= "ENFORCE" or IsPartDriven(entity)) then
-		const Penetration: number? = Sweep(entity, state.position, cframe, state.safe.Position)
-		if Penetration then
-			Violate(player, entity, state, cframe, now, "NOCLIP", Penetration)
-			return
+		if (position - state.sweepFrom).Magnitude >= NoclipMinTravel then
+			const Penetration: number? = Sweep(entity, state.sweepFrom, cframe, state.safe.Position)
+			if Penetration then
+				Violate(player, entity, state, cframe, now, "NOCLIP", Penetration)
+				return
+			end
+			state.sweepFrom = position
 		end
 	end
 
@@ -682,14 +688,13 @@ const function Gate(player: Player, entity: Entity, state: State, cframe: CFrame
 		end
 	end
 
-	if NoclipEnabled then
-		const Origin: CFrame? = entity.latestCFrame
-		const Penetration: number? =
-			Sweep(entity, if Origin then Origin.Position else state.position, cframe, state.safe.Position)
+	if NoclipEnabled and (cframe.Position - state.sweepFrom).Magnitude >= NoclipMinTravel then
+		const Penetration: number? = Sweep(entity, state.sweepFrom, cframe, state.safe.Position)
 		if Penetration then
 			Violate(player, entity, state, cframe, now, "NOCLIP", Penetration)
 			return true
 		end
+		state.sweepFrom = cframe.Position
 	end
 	return false
 end
