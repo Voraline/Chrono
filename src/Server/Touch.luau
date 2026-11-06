@@ -12,7 +12,6 @@ type Entity = Types.Entity
 type Target = Entity | BasePart | Model
 type TouchEvent = Types.Event<(Part: BasePart) -> (), BasePart>
 type PlayerEvent = Types.Event<(Player: Player, Part: BasePart) -> (), Player, BasePart>
-type Disconnectable = RBXScriptConnection | Types.Connection
 
 export type Options = {
 	Size: Vector3?,
@@ -46,7 +45,7 @@ type Impl = Tracker & {
 	_Model: Instance?,
 	_Part: BasePart?,
 	_Measured: boolean,
-	_ModelConnections: { Disconnectable },
+	_ModelConnections: { RBXScriptConnection },
 	_Offset: CFrame,
 	_UserOffset: CFrame,
 	_Size: Vector3,
@@ -58,12 +57,13 @@ type Impl = Tracker & {
 	_Stamp: number,
 	_Overlapping: { [BasePart]: number },
 	_Destroyed: boolean,
-	_DestroyConnection: Disconnectable?,
+	_DestroyConnection: RBXScriptConnection?,
+	_EntityConnection: Types.Connection?,
 }
 
 const IsServer: boolean = RunService:IsServer()
 const DefaultInterval: number = 1 / 20
-const Empty: { BasePart } = table.freeze({})
+const Empty: { BasePart } = table.freeze({} :: { BasePart })
 
 local Budget: number = 0.0005
 local Heartbeat: RBXScriptConnection? = nil
@@ -149,7 +149,15 @@ const function Resolve(Target: Target): (Instance?, BasePart?)
 	if typeof(Target) == "Instance" then
 		const Item: Instance = (Target :: any) :: Instance
 		if Item:IsA("Model") then
-			return Item, Item.PrimaryPart or Item:FindFirstChildWhichIsA("BasePart", true)
+			const Primary: BasePart? = Item.PrimaryPart
+			if Primary then
+				return Item, Primary
+			end
+			const Found: Instance? = Item:FindFirstChildWhichIsA("BasePart", true)
+			if Found and Found:IsA("BasePart") then
+				return Item, Found
+			end
+			return Item, nil
 		end
 		return Item, Item :: BasePart
 	end
@@ -170,18 +178,10 @@ const function FindPlayer(Part: BasePart): Player?
 	return nil
 end
 
-const function Release(Connection: Disconnectable): ()
-	if typeof(Connection) == "RBXScriptConnection" then
-		Connection:Disconnect()
-	else
-		Connection:Disconnect()
-	end
-end
-
 const function Unwatch(self: Impl): ()
-	const Connections: { Disconnectable } = self._ModelConnections
+	const Connections: { RBXScriptConnection } = self._ModelConnections
 	for Index: number = 1, #Connections do
-		Release(Connections[Index])
+		Connections[Index]:Disconnect()
 	end
 	table.clear(Connections)
 end
@@ -383,10 +383,15 @@ function Tracker.Destroy(self: Impl): ()
 	self._Destroyed = true
 	HeapRemove(self)
 
-	const Connection: Disconnectable? = self._DestroyConnection
+	const Connection: RBXScriptConnection? = self._DestroyConnection
 	if Connection then
 		self._DestroyConnection = nil
-		Release(Connection)
+		Connection:Disconnect()
+	end
+	const EntityConnection: Types.Connection? = self._EntityConnection
+	if EntityConnection then
+		self._EntityConnection = nil
+		EntityConnection:Disconnect()
 	end
 	Unwatch(self)
 
@@ -475,15 +480,18 @@ function Touch.Track(Target: Target, Settings: Options?): Tracker
 		_Overlapping = {},
 		_Destroyed = false,
 		_DestroyConnection = nil,
+		_EntityConnection = nil,
 	}, Tracker) :: any
 
-	self._DestroyConnection = if IsInstance
-		then ((Target :: any) :: Instance).Destroying:Connect(function(): ()
+	if IsInstance then
+		self._DestroyConnection = ((Target :: any) :: Instance).Destroying:Connect(function(): ()
 			self:Destroy()
 		end)
-		else Entity.GetEvent((Target :: any) :: Entity, "Destroying"):Connect(function(): ()
+	else
+		self._EntityConnection = Entity.GetEvent((Target :: any) :: Entity, "Destroying"):Connect(function(): ()
 			self:Destroy()
 		end)
+	end
 
 	HeapPush(self)
 	if not Heartbeat then
