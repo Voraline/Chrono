@@ -1,7 +1,7 @@
 --!native
 
-const Players = game:GetService("Players")
-const RunService = game:GetService("RunService")
+const Players: Players = game:GetService("Players")
+const RunService: RunService = game:GetService("RunService")
 
 const Shared = script.Parent.Parent.Shared
 const Entity = require(Shared.Entity)
@@ -12,6 +12,7 @@ type Entity = Types.Entity
 type Target = Entity | BasePart | Model
 type TouchEvent = Types.Event<(Part: BasePart) -> (), BasePart>
 type PlayerEvent = Types.Event<(Player: Player, Part: BasePart) -> (), Player, BasePart>
+type Disconnectable = RBXScriptConnection | Types.Connection
 
 export type Options = {
 	Size: Vector3?,
@@ -43,6 +44,9 @@ type Impl = Tracker & {
 	_Params: OverlapParams,
 	_Filter: { Instance },
 	_Model: Instance?,
+	_Part: BasePart?,
+	_Measured: boolean,
+	_ModelConnections: { Disconnectable },
 	_Offset: CFrame,
 	_UserOffset: CFrame,
 	_Size: Vector3,
@@ -50,27 +54,100 @@ type Impl = Tracker & {
 	_LiveSize: boolean,
 	_Interval: number,
 	_NextTime: number,
+	_HeapIndex: number,
 	_Stamp: number,
 	_Overlapping: { [BasePart]: number },
 	_Destroyed: boolean,
-	_DestroyConnection: Types.Connection?,
+	_DestroyConnection: Disconnectable?,
 }
 
-const IsServer = RunService:IsServer()
-const DefaultInterval = 1 / 20
+const IsServer: boolean = RunService:IsServer()
+const DefaultInterval: number = 1 / 20
+const Empty: { BasePart } = table.freeze({})
 
-local Budget = 0.0005
-local Cursor = 1
-local Dirty = false
+local Budget: number = 0.0005
 local Heartbeat: RBXScriptConnection? = nil
-const Active: { Impl } = {}
+const Heap: { Impl } = {}
 
 const Tracker = {}
 Tracker.__index = Tracker
 
+const function SiftUp(Start: number): ()
+	const Item: Impl = Heap[Start]
+	local Index: number = Start
+	while Index > 1 do
+		const ParentIndex: number = Index // 2
+		const Parent: Impl = Heap[ParentIndex]
+		if Item._NextTime >= Parent._NextTime then
+			break
+		end
+		Heap[Index] = Parent
+		Parent._HeapIndex = Index
+		Index = ParentIndex
+	end
+	Heap[Index] = Item
+	Item._HeapIndex = Index
+end
+
+const function SiftDown(Start: number): ()
+	const Count: number = #Heap
+	const Item: Impl = Heap[Start]
+	local Index: number = Start
+	while true do
+		local Child: number = Index * 2
+		if Child > Count then
+			break
+		end
+		if Child < Count and Heap[Child + 1]._NextTime < Heap[Child]._NextTime then
+			Child += 1
+		end
+		const Smaller: Impl = Heap[Child]
+		if Smaller._NextTime >= Item._NextTime then
+			break
+		end
+		Heap[Index] = Smaller
+		Smaller._HeapIndex = Index
+		Index = Child
+	end
+	Heap[Index] = Item
+	Item._HeapIndex = Index
+end
+
+const function HeapPush(Item: Impl): ()
+	const Count: number = #Heap + 1
+	Heap[Count] = Item
+	Item._HeapIndex = Count
+	SiftUp(Count)
+end
+
+const function HeapRemove(Item: Impl): ()
+	const Index: number = Item._HeapIndex
+	if Index == 0 then
+		return
+	end
+	Item._HeapIndex = 0
+	const Count: number = #Heap
+	const Last: Impl = Heap[Count]
+	Heap[Count] = nil :: any
+	if Index == Count then
+		return
+	end
+	Heap[Index] = Last
+	Last._HeapIndex = Index
+	SiftDown(Index)
+	SiftUp(Last._HeapIndex)
+end
+
+const function HasListeners(self: Impl): boolean
+	return self._Touched:HasListeners()
+		or self._Ended:HasListeners()
+		or self._PlayerTouched:HasListeners()
+		or self._PlayerEnded:HasListeners()
+end
+
 const function Resolve(Target: Target): (Instance?, BasePart?)
 	if typeof(Target) == "Instance" then
-		const Item = Target :: Instance
+		const Item: Instance = (Target :: any) :: Instance
 		if Item:IsA("Model") then
 			return Item, Item.PrimaryPart or Item:FindFirstChildWhichIsA("BasePart", true)
 		end
@@ -79,45 +156,106 @@ const function Resolve(Target: Target): (Instance?, BasePart?)
 	return (Target :: any).model, Entity.GetPrimaryPart(Target :: Entity)
 end
 
-const function Measure(self: Impl, Model: Instance, Part: BasePart?)
-	self._Model = Model
-	self._Filter[1] = Model
-	self._Params.FilterDescendantsInstances = self._Filter
+const function FindPlayer(Part: BasePart): Player?
+	local Current: Instance? = Part.Parent
+	while Current and Current ~= workspace do
+		if Current:IsA("Model") then
+			const Found: Player? = Players:GetPlayerFromCharacter(Current)
+			if Found then
+				return Found
+			end
+		end
+		Current = Current.Parent
+	end
+	return nil
+end
+
+const function Release(Connection: Disconnectable): ()
+	if typeof(Connection) == "RBXScriptConnection" then
+		Connection:Disconnect()
+	else
+		Connection:Disconnect()
+	end
+end
+
+const function Unwatch(self: Impl): ()
+	const Connections: { Disconnectable } = self._ModelConnections
+	for Index: number = 1, #Connections do
+		Release(Connections[Index])
+	end
+	table.clear(Connections)
+end
+
+const function Watch(self: Impl, Model: Instance): ()
+	Unwatch(self)
+	if self._FixedSize or not Model:IsA("Model") then
+		return
+	end
+	const function Invalidate(): ()
+		self._Measured = false
+	end
+	self._ModelConnections[1] = Model.DescendantAdded:Connect(Invalidate)
+	self._ModelConnections[2] = Model.DescendantRemoving:Connect(Invalidate)
+end
+
+const function Measure(self: Impl, Model: Instance, Part: BasePart): ()
+	if Model ~= self._Model then
+		self._Model = Model
+		self._Filter[1] = Model
+		self._Params.FilterDescendantsInstances = self._Filter
+		Watch(self, Model)
+	end
+	self._Part = Part
+	self._Measured = true
 	self._LiveSize = false
 	if self._FixedSize then
 		self._Offset = self._UserOffset
 	elseif Model:IsA("Model") then
-		const BoxCFrame, BoxSize = Model:GetBoundingBox()
+		const BoxCFrame: CFrame, BoxSize: Vector3 = Model:GetBoundingBox()
 		self._Size = BoxSize
-		self._Offset = (if Part then Part.CFrame:ToObjectSpace(BoxCFrame) else CFrame.identity) * self._UserOffset
+		self._Offset = Part.CFrame:ToObjectSpace(BoxCFrame) * self._UserOffset
 	elseif Model:IsA("BasePart") then
 		self._LiveSize = true
 		self._Offset = self._UserOffset
 	end
 end
 
-const function PartEntered(self: Impl, Part: BasePart)
+const function Collect(self: Impl): { BasePart }
+	if self._Destroyed then
+		return Empty
+	end
+	const Model: Instance?, Part: BasePart? = Resolve(self.Target)
+	if not Model or not Part then
+		return Empty
+	end
+	if not self._Measured or Model ~= self._Model or Part ~= self._Part then
+		Measure(self, Model, Part)
+	end
+	const Size: Vector3 = if self._LiveSize then Part.Size else self._Size
+	return workspace:GetPartBoundsInBox(Part.CFrame * self._Offset, Size, self._Params)
+end
+
+const function PartEntered(self: Impl, Part: BasePart): ()
+	const Player: Player? = FindPlayer(Part)
+	local First: boolean = false
+	if Player then
+		self._PlayerParts[Part] = Player
+		const Count: number = (self._PlayerCounts[Player] or 0) + 1
+		self._PlayerCounts[Player] = Count
+		First = Count == 1
+	end
 	self._Touched:Fire(Part)
-	if self._PlayerTouched:HasListeners() or self._PlayerEnded:HasListeners() then
-		const Character = Part:FindFirstAncestorOfClass("Model")
-		const Player = if Character then Players:GetPlayerFromCharacter(Character) else nil
-		if Player then
-			self._PlayerParts[Part] = Player
-			const Count = (self._PlayerCounts[Player] or 0) + 1
-			self._PlayerCounts[Player] = Count
-			if Count == 1 then
-				self._PlayerTouched:Fire(Player, Part)
-			end
-		end
+	if First and Player and not self._Destroyed then
+		self._PlayerTouched:Fire(Player, Part)
 	end
 end
 
-const function PartLeft(self: Impl, Part: BasePart)
+const function PartLeft(self: Impl, Part: BasePart): ()
 	self._Ended:Fire(Part)
-	const Player = self._PlayerParts[Part]
+	const Player: Player? = self._PlayerParts[Part]
 	if Player then
 		self._PlayerParts[Part] = nil
-		const Count = (self._PlayerCounts[Player] or 1) - 1
+		const Count: number = (self._PlayerCounts[Player] or 1) - 1
 		if Count <= 0 then
 			self._PlayerCounts[Player] = nil
 			self._PlayerEnded:Fire(Player, Part)
@@ -127,17 +265,10 @@ const function PartLeft(self: Impl, Part: BasePart)
 	end
 end
 
-const function Update(self: Impl)
-	const Overlapping = self._Overlapping
+const function Update(self: Impl): ()
+	const Overlapping: { [BasePart]: number } = self._Overlapping
 
-	if
-		not (
-			self._Touched:HasListeners()
-			or self._Ended:HasListeners()
-			or self._PlayerTouched:HasListeners()
-			or self._PlayerEnded:HasListeners()
-		)
-	then
+	if not HasListeners(self) then
 		if next(Overlapping) ~= nil then
 			table.clear(Overlapping)
 			table.clear(self._PlayerParts)
@@ -146,66 +277,38 @@ const function Update(self: Impl)
 		return
 	end
 
-	const Model, Part = Resolve(self.Target)
-	if not Model or not Part then
-		return
-	end
-	if Model ~= self._Model then
-		Measure(self, Model, Part)
-	end
-
-	const Stamp = self._Stamp + 1
+	const Results: { BasePart } = Collect(self)
+	const Stamp: number = self._Stamp + 1
 	self._Stamp = Stamp
 
-	const Size = if self._LiveSize then Part.Size else self._Size
-	const Results = workspace:GetPartBoundsInBox(Part.CFrame * self._Offset, Size, self._Params)
-	for Index = 1, #Results do
-		const Other = Results[Index]
-		if Overlapping[Other] then
-			Overlapping[Other] = Stamp
-		elseif Other.CanTouch then
-			Overlapping[Other] = Stamp
-			PartEntered(self, Other)
+	for Index: number = 1, #Results do
+		const Other: BasePart = Results[Index]
+		if Other.CanTouch then
+			if Overlapping[Other] then
+				Overlapping[Other] = Stamp
+			else
+				Overlapping[Other] = Stamp
+				PartEntered(self, Other)
+				if self._Destroyed then
+					return
+				end
+			end
 		end
 	end
 
-	for Other, Seen in Overlapping do
+	for Other: BasePart, Seen: number in Overlapping do
 		if Seen ~= Stamp then
 			Overlapping[Other] = nil
 			PartLeft(self, Other)
-		end
-	end
-end
-
-const function Compact()
-	Dirty = false
-	const Count = #Active
-	local Write = 1
-	local NewCursor = 1
-	for Read = 1, Count do
-		if Read == Cursor then
-			NewCursor = Write
-		end
-		const Item = Active[Read]
-		if not Item._Destroyed then
-			if Write ~= Read then
-				Active[Write] = Item
+			if self._Destroyed then
+				return
 			end
-			Write += 1
 		end
 	end
-	for Index = Count, Write, -1 do
-		Active[Index] = nil
-	end
-	Cursor = if NewCursor > Write - 1 then 1 else NewCursor
 end
 
-const function Step()
-	if Dirty then
-		Compact()
-	end
-	const Count = #Active
-	if Count == 0 then
+const function Step(): ()
+	if #Heap == 0 then
 		if Heartbeat then
 			Heartbeat:Disconnect()
 			Heartbeat = nil
@@ -213,72 +316,116 @@ const function Step()
 		return
 	end
 
-	const Now = os.clock()
-	const Deadline = Now + Budget
-	local Index = if Cursor > Count then 1 else Cursor
+	const Now: number = os.clock()
+	const Deadline: number = Now + Budget
 
-	for _ = 1, Count do
-		const Item = Active[Index]
-		Index = if Index == Count then 1 else Index + 1
-		Cursor = Index
-		if not Item._Destroyed and Now >= Item._NextTime then
-			Item._NextTime = Now + Item._Interval
-			Update(Item)
-			if os.clock() >= Deadline then
-				break
-			end
+	while true do
+		const Item: Impl? = Heap[1]
+		if not Item or Item._NextTime >= Now then
+			break
+		end
+		HeapRemove(Item)
+		Item._NextTime = Now + Item._Interval
+		Update(Item)
+		if not Item._Destroyed then
+			HeapPush(Item)
+		end
+		if os.clock() >= Deadline then
+			break
 		end
 	end
 end
 
 function Tracker.IsTouching(self: Impl, Part: BasePart): boolean
-	return self._Overlapping[Part] ~= nil
+	if self._Destroyed then
+		return false
+	end
+	if HasListeners(self) then
+		return self._Overlapping[Part] ~= nil
+	end
+	const Results: { BasePart } = Collect(self)
+	for Index: number = 1, #Results do
+		if Results[Index] == Part then
+			return Part.CanTouch
+		end
+	end
+	return false
 end
 
 function Tracker.GetTouching(self: Impl): { BasePart }
 	const List: { BasePart } = {}
-	local Count = 0
-	for Part in self._Overlapping do
-		Count += 1
-		List[Count] = Part
+	if self._Destroyed then
+		return List
+	end
+	local Count: number = 0
+	if HasListeners(self) then
+		for Part: BasePart in self._Overlapping do
+			Count += 1
+			List[Count] = Part
+		end
+	else
+		const Results: { BasePart } = Collect(self)
+		for Index: number = 1, #Results do
+			const Part: BasePart = Results[Index]
+			if Part.CanTouch then
+				Count += 1
+				List[Count] = Part
+			end
+		end
 	end
 	return List
 end
 
-function Tracker.Destroy(self: Impl)
+function Tracker.Destroy(self: Impl): ()
 	if self._Destroyed then
 		return
 	end
 	self._Destroyed = true
-	Dirty = true
+	HeapRemove(self)
+
+	const Connection: Disconnectable? = self._DestroyConnection
+	if Connection then
+		self._DestroyConnection = nil
+		Release(Connection)
+	end
+	Unwatch(self)
+
+	const Remaining: { BasePart } = {}
+	local Count: number = 0
+	for Part: BasePart in self._Overlapping do
+		Count += 1
+		Remaining[Count] = Part
+	end
+	table.clear(self._Overlapping)
+	for Index: number = 1, Count do
+		PartLeft(self, Remaining[Index])
+	end
+
+	table.clear(self._PlayerParts)
+	table.clear(self._PlayerCounts)
 	self._Touched:DisconnectAll()
 	self._Ended:DisconnectAll()
 	self._PlayerTouched:DisconnectAll()
 	self._PlayerEnded:DisconnectAll()
-	const Connection = self._DestroyConnection
-	if Connection then
-		self._DestroyConnection = nil
-		Connection:Disconnect()
-	end
 end
 
 const Touch = {}
 
 function Touch.Track(Target: Target, Settings: Options?): Tracker
 	assert(IsServer, "Chrono.Touch.Track can only be used on the server")
-	const IsInstance = typeof(Target) == "Instance"
+	const IsInstance: boolean = typeof(Target) == "Instance"
 	assert(
 		if IsInstance
-			then (Target :: Instance):IsA("BasePart") or (Target :: Instance):IsA("Model")
+			then ((Target :: any) :: Instance):IsA("BasePart") or ((Target :: any) :: Instance):IsA("Model")
 			else type(Target) == "table" and not (Target :: any).destroyed,
 		"Chrono.Touch.Track expects a live entity, a BasePart or a Model"
 	)
 
 	const Opts: Options = Settings or {}
-	const TickInterval = if IsInstance then DefaultInterval else (Target :: any).entityConfig.TICK_RATE
-	const Interval = math.max(Opts.Interval or TickInterval or DefaultInterval, 0)
+	const TickInterval: number? = if IsInstance then DefaultInterval else (Target :: any).entityConfig.TICK_RATE
+	const Interval: number = math.max(Opts.Interval or TickInterval or DefaultInterval, 0)
 
-	const Params = OverlapParams.new()
+	const Params: OverlapParams = OverlapParams.new()
 	Params.FilterType = Enum.RaycastFilterType.Exclude
 	Params.MaxParts = Opts.MaxParts or 0
 	if Opts.CollisionGroup then
@@ -286,9 +433,9 @@ function Touch.Track(Target: Target, Settings: Options?): Tracker
 	end
 
 	const Filter: { Instance } = {}
-	const Ignore = Opts.Ignore
+	const Ignore: { Instance }? = Opts.Ignore
 	if Ignore then
-		for Index, Item in Ignore do
+		for Index: number, Item: Instance in Ignore do
 			Filter[Index + 1] = Item
 		end
 	end
@@ -313,6 +460,9 @@ function Touch.Track(Target: Target, Settings: Options?): Tracker
 		_Params = Params,
 		_Filter = Filter,
 		_Model = nil,
+		_Part = nil,
+		_Measured = false,
+		_ModelConnections = {},
 		_Offset = CFrame.identity,
 		_UserOffset = Opts.Offset or CFrame.identity,
 		_Size = Opts.Size or Vector3.one,
@@ -320,6 +470,7 @@ function Touch.Track(Target: Target, Settings: Options?): Tracker
 		_LiveSize = false,
 		_Interval = Interval,
 		_NextTime = os.clock() + math.random() * Interval,
+		_HeapIndex = 0,
 		_Stamp = 0,
 		_Overlapping = {},
 		_Destroyed = false,
@@ -327,14 +478,14 @@ function Touch.Track(Target: Target, Settings: Options?): Tracker
 	}, Tracker) :: any
 
 	self._DestroyConnection = if IsInstance
-		then (Target :: Instance).Destroying:Connect(function()
+		then ((Target :: any) :: Instance).Destroying:Connect(function(): ()
 			self:Destroy()
 		end)
-		else Entity.GetEvent(Target :: Entity, "Destroying"):Connect(function()
+		else Entity.GetEvent((Target :: any) :: Entity, "Destroying"):Connect(function(): ()
 			self:Destroy()
 		end)
 
-	table.insert(Active, self)
+	HeapPush(self)
 	if not Heartbeat then
 		Heartbeat = RunService.Heartbeat:Connect(Step)
 	end
@@ -342,7 +493,7 @@ function Touch.Track(Target: Target, Settings: Options?): Tracker
 	return self
 end
 
-function Touch.SetBudget(Seconds: number)
+function Touch.SetBudget(Seconds: number): ()
 	assert(type(Seconds) == "number" and Seconds > 0, "Chrono.Touch.SetBudget expects a positive number of seconds")
 	Budget = Seconds
 end
