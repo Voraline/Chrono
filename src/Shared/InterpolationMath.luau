@@ -6,31 +6,32 @@ const Config = require(script.Parent.Config)
 const function Hermite(p0: Vector3, p1: Vector3, v0: Vector3, v1: Vector3, t: number, dt: number): Vector3
 	v0 = v0 or Vector3.zero
 	v1 = v1 or Vector3.zero
+	const d = p1 - p0
 	if not dt or dt == 0 then
-		return p0 + (p1 - p0) * t
+		return p0 + d * t
 	end
 
 	-- Cap tangent at 3x the segment length to reduce overshoot.
 	-- https://en.wikipedia.org/wiki/Monotone_cubic_interpolation
 
-	const maxTangent = vector.magnitude((p1 - p0) :: any) * 3
-	const t0Length = vector.magnitude(v0 :: any) * dt
-	if t0Length > maxTangent then
-		v0 *= maxTangent / t0Length
+	const maxSq = vector.dot(d :: any, d :: any) * 9
+	const dtSq = dt * dt
+	const s0 = vector.dot(v0 :: any, v0 :: any) * dtSq
+	if s0 > maxSq then
+		v0 *= math.sqrt(maxSq / s0)
 	end
-	const t1Length = vector.magnitude(v1 :: any) * dt
-	if t1Length > maxTangent then
-		v1 *= maxTangent / t1Length
+	const s1 = vector.dot(v1 :: any, v1 :: any) * dtSq
+	if s1 > maxSq then
+		v1 *= math.sqrt(maxSq / s1)
 	end
 
 	const t2 = t * t
 	const t3 = t2 * t
-	const h00 = 2 * t3 - 3 * t2 + 1
-	const h10 = t3 - 2 * t2 + t
-	const h01 = -2 * t3 + 3 * t2
-	const h11 = t3 - t2
+	const h10 = (t3 - 2 * t2 + t) * dt
+	const h01 = 3 * t2 - 2 * t3
+	const h11 = (t3 - t2) * dt
 
-	return p0 * h00 + v0 * dt * h10 + p1 * h01 + v1 * dt * h11
+	return p0 + d * h01 + v0 * h10 + v1 * h11
 end
 
 const function HermiteCFrame(c0: CFrame, c1: CFrame, v0: Vector3, v1: Vector3, t: number, dt: number): CFrame
