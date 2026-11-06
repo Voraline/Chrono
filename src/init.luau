@@ -15,6 +15,7 @@ const ReplicationRules = require(script.Shared.ReplicationRules)
 const Snapshots = require(script.Shared.Snapshots)
 const Types = require(script.Shared.Types)
 const EntityGrid = require(script.Server.EntityGrid)
+const Touch = require(script.Server.Touch)
 
 export type SnapshotData<Value, Velocity> = Types.SnapshotData<Value, Velocity>
 export type Signal<fx, T...> = Types.Signal<fx, T...>
@@ -33,6 +34,8 @@ export type ReplicationRule = Types.ReplicationRule
 export type EntityReceivePacket = Types.EntityReceivePacket
 export type Entity = Types.Entity
 export type PlayerEntityHolder = Types.PlayerEntityHolder
+export type TouchTracker = Touch.Tracker
+export type TouchOptions = Touch.Options
 
 const function CheckVersion()
 	task.spawn(function()
@@ -105,4 +108,5 @@ return {
 	ServerReceiver = Receiver,
 	Rollback = Rollback,
 	EntityGrid = EntityGrid,
+	Touch = Touch,
 }
