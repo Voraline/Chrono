@@ -8,6 +8,7 @@ export type SnapshotData<Value = CFrame, Velocity = Vector3> = {
 export type Signal<fx, T...> = {
 	Fire: (self: any, T...) -> (),
 	DisconnectAll: (self: any) -> (),
+	HasListeners: (self: any) -> boolean,
 	Event: Event<fx, T...>,
 	_binCleanup: (self: any) -> (),
 }
@@ -94,7 +95,14 @@ export type MODEL_REPLICATION_MODE = "NATIVE" | "NATIVE_WITH_LOCK" | "CUSTOM"
 
 export type INTERPOLATION_MODE = "CFRAME" | "ALIGN" | "NONE"
 
-export type InterpolationFunction = (from: CFrame, to: CFrame, v0: Vector3, v1: Vector3, t: number, dt: number) -> CFrame
+export type InterpolationFunction = (
+	from: CFrame,
+	to: CFrame,
+	v0: Vector3,
+	v1: Vector3,
+	t: number,
+	dt: number
+) -> CFrame
 
 export type AlignDriver = {
 	part: BasePart,
@@ -109,7 +117,7 @@ export type AlignDriver = {
 
 export type EntityConfig = {
 	NAME: string,
-	TICKER: Ticker?,
+	ticker: Ticker?, -- server only, available after Start
 	CLIENT_CLOCK: {
 		NORMAL: ClientClock?,
 		HALF: ClientClock?,
@@ -150,13 +158,15 @@ export type EntityConfigInput = {
 }
 
 export type Ticker = {
-	tickedHalf: boolean,
+	isHalf: boolean,
 	tickRate: number,
 	tickHalfRate: number,
 	lastTicked: number,
+	_nextTick: number, -- os.clock() of the next scheduled tick
 	tickedFrame: number,
 	objects: { Entity },
-	callbacks: { (ticker: Ticker, dt: number) -> () },
+	Ticked: Event<(ticker: Ticker, dt: number) -> (), Ticker, number>,
+	_tickedSignal: Signal<(ticker: Ticker, dt: number) -> (), Ticker, number>,
 	config: EntityConfig,
 	dt: number,
 	halfdt: number,
@@ -251,6 +261,8 @@ export type Entity = {
 	latestTime: number?,
 	lastCheckedCFrame: CFrame?,
 	lastReplicatedTime: number?,
+	_nextSend: number?, -- os.clock() of the owner's next scheduled send check (client)
+	_lastCheck: number?, -- os.clock() of the owner's last send check (client)
 	lastClientClock: number?,
 	_teleport: number?,
 	_setAt: number?,
@@ -266,8 +278,9 @@ export type Entity = {
 	_stopAfter: number?, -- unchanged ticks before a pause counts as a stop (1 if nil)
 	_lastStep: Vector3?,
 	_pausedSteps: number?, -- changes in a row that came after a pause and repeated the step before
-	_halfBuffer: buffer?, -- serialized resting cframe for half rate
+	_halfBuffer: buffer?, -- serialized cframe for half rate
 	arriveFrame: number?, -- tick a client owned update arrived on
+	_halfTime: number?, -- owner timestamp of the last update relayed at half rate
 
 	-- Interpolation (Client)
 	interpolation: boolean,
@@ -276,13 +289,14 @@ export type Entity = {
 	_clockBuffer: number?, -- per entity buffer override from SetClockBuffer
 	_clientClock: ClientClock?, -- own clock for player owned or custom buffered entities
 	_ownerChangedAt: number?, -- time when owner changed
-	_ownerSmoothing: { offset: Vector3, rotation: CFrame, start: number }?, 
+	_ownerSmoothing: { offset: Vector3, rotation: CFrame, start: number }?,
 	_outofBroadPhaseTick: number?,
 
 	-- Humanoid state replication
 	_humanoidState: number?,
 	_humanoidDisabledStates: number?,
-	_ownDisabledStates: number?, 
+	_ownDisabledStates: number?,
+	_ownStatesHumanoid: Humanoid?, -- the humanoid _ownDisabledStates was read from
 	_humanoidStateConn: RBXScriptConnection?,
 	_humanoidStateEnabledConn: RBXScriptConnection?,
 

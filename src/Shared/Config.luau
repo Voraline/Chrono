@@ -55,7 +55,7 @@ export type SetConfig =
 	& ("ROLLBACK_NOCLIP_MARGIN", number) -> ()
 local LOCKED = false
 const BASE_CONFIG = {
-	__VERSION = "v2.2.3",
+	__VERSION = "v2.3.0",
 	CHECK_NEW_VERSION = true,
 	MAX_TOTAL_BYTES_PER_FRAME_PER_PLAYER = 300, -- Base line value
 	MIN_BUFFER = 0.09,
@@ -74,7 +74,7 @@ const BASE_CONFIG = {
 
 	WARNING_SEVERITY = "MEDIUM", -- "NONE", "LOW", "MEDIUM", "HIGH"
 	DEFAULT_NORMAL_TICK_DISTANCE = 50,
-	DEFAULT_HALF_TICK_DISTANCE = 100, -- Anything beyond this distance will not be replicated for non-owned entities. 
+	DEFAULT_HALF_TICK_DISTANCE = 100, -- Anything beyond this distance will not be replicated for non-owned entities.
 
 	REPLICATE_DEATHS = "PLAYER_CHARACTERS",
 	--[[
@@ -111,7 +111,7 @@ const BASE_CONFIG = {
 		-ALIGN = Drive an AlignPosition/AlignOrientation toward the target instead.
 			+ Physics keeps resolving joints and collisions while still tracking the target.
 			- More expensive, and has unknown interactions with other constraints.
-		-NONE = Do not apply the transform at all. 
+		-NONE = Do not apply the transform at all.
 	]]
 	DEFAULT_MODEL_REPLICATION_MODE = "NATIVE",
 	--[[
@@ -192,13 +192,15 @@ const function CheckEntityType(name: string, config: Types.EntityConfigInput)
 			`Chrono: entity type "{name}" {field} must be a non-negative number`
 		)
 	end
-	for _, field in {
-		"FULL_ROTATION",
-		"AUTO_UPDATE_POSITION",
-		"STORE_SNAPSHOTS",
-		"ASSEMBLY_ROOT_PART_CHECK",
-		"CUSTOM_INTERPOLATION",
-	} do
+	for _, field in
+		{
+			"FULL_ROTATION",
+			"AUTO_UPDATE_POSITION",
+			"STORE_SNAPSHOTS",
+			"ASSEMBLY_ROOT_PART_CHECK",
+			"CUSTOM_INTERPOLATION",
+		}
+	do
 		const value = (config :: any)[field]
 		assert(value == nil or type(value) == "boolean", `Chrono: entity type "{name}" {field} must be a boolean`)
 	end
@@ -327,7 +329,7 @@ const function Lock()
 			or BASE_CONFIG.DEFAULT_MODEL_REPLICATION_MODE :: any
 		cloned.INTERPOLATION_MODE = cloned.INTERPOLATION_MODE or BASE_CONFIG.DEFAULT_INTERPOLATION_MODE :: any
 		if IS_SERVER then
-			cloned.TICKER = (require)(script.Parent.Ticker).new(cloned)
+			cloned.ticker = (require)(script.Parent.Ticker).new(cloned)
 		else
 			cloned.CLIENT_CLOCK = {} :: any
 			cloned.UpdateBuffer = function(self: Types.EntityConfig, buffer: number)
@@ -373,14 +375,14 @@ return {
 	},
 
 	_EntityConfigs = ENTITY_TYPES,
-	_GetEntityType = GetEntityType, --// For internal use only
+	_GetEntityType = GetEntityType, --// For internal use only (kept for compatibility)
 	GetEntityType = GetEntityType,
 	_GetEntityModel = GetEntityModel,
 	_GetConfig = GetConfig,
 	_Lock = Lock,
 	_WaitForLock = WaitForLock,
 	_GetBroadPhase = GetBroadPhase,
-	_Base_Config = BASE_CONFIG, --//Modifying this after locking may not change behaviors of some config options.
+	_Base_Config = BASE_CONFIG, --//Modifying this after locking may change behaviors of some config options.
 	SetModelPrimaryForChrono = function(model: Model, primaryName: string)
 		model:SetAttribute(CHRONO_PRIMARY, primaryName)
 	end,

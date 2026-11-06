@@ -18,7 +18,7 @@ const UpdateEntityStats = require(script.Parent.EntityStats)
 const Stats = require(Shared.Stats).CLIENT
 
 const CLIENT_CLOCK_SYNC_RATE = 15 -- should be fine having lower then server
-const MAX_OWNER_SMOOTH_DELAY = 2 -- seconds after an ownership change 
+const MAX_OWNER_SMOOTH_DELAY = 2 -- seconds after an ownership change
 require(script.Parent.Player)
 require(script.Parent.Receiver)
 
@@ -124,7 +124,9 @@ end
 Config._WaitForLock(function()
 	local steppedEntities: { Types.Entity } = {}
 	RunService.Heartbeat:Connect(function(deltaTime: number)
-		local sizeBefore = #steppedEntities
+		if AmtInterpolations > 59 then
+			steppedEntities = {}
+		end
 		table.clear(steppedEntities)
 		Frustum.Update()
 		RenderCache.UpdateAll(deltaTime)
@@ -141,7 +143,6 @@ Config._WaitForLock(function()
 				continue
 			end
 			if entity.mountParentId then
-
 				AlignDriver.Clear(entity)
 				continue
 			end
@@ -184,9 +185,6 @@ Config._WaitForLock(function()
 		if AmtInterpolations > 60 then
 			TotalInterpolationTime = 0
 			AmtInterpolations = 0
-			if sizeBefore ~= #steppedEntities then
-				steppedEntities = {}
-			end
 		end
 		Sender.Update()
 		Ticker._IncrementGlobalTick()
