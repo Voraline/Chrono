@@ -13,35 +13,35 @@ const Warn = require(Shared.Warn)
 type Entity = Types.Entity
 
 type Override = {
-	graceUntil: number,
-	bonus: number,
-	bonusUntil: number,
-	maxSpeed: number?,
+	GraceUntil: number,
+	Bonus: number,
+	BonusUntil: number,
+	MaxSpeed: number?,
 }
 
 type State = {
-	time: number,
-	position: Vector3,
-	sweepFrom: Vector3,
-	safe: CFrame,
-	safeTime: number,
-	setStamp: number?,
-	humanoid: Humanoid?,
-	params: RaycastParams?,
-	horizontal: number,
-	vertical: number,
-	speedPeak: number,
-	idle: number,
-	airTime: number,
-	groundY: number,
-	lift: number,
-	floor: BasePart?,
-	floorOffset: Vector3?,
-	pending: CFrame?,
-	pendingUntil: number,
-	reapply: boolean,
-	attempts: number,
-	desynced: boolean,
+	Time: number,
+	Position: Vector3,
+	SweepFrom: Vector3,
+	Safe: CFrame,
+	SafeTime: number,
+	SetStamp: number?,
+	Humanoid: Humanoid?,
+	Params: RaycastParams?,
+	Horizontal: number,
+	Vertical: number,
+	SpeedPeak: number,
+	Idle: number,
+	AirTime: number,
+	GroundY: number,
+	Lift: number,
+	Floor: BasePart?,
+	FloorOffset: Vector3?,
+	Pending: CFrame?,
+	PendingUntil: number,
+	Reapply: boolean,
+	Attempts: number,
+	Desynced: boolean,
 }
 
 type ClipCache = {
@@ -49,10 +49,13 @@ type ClipCache = {
 	Model: (Model | BasePart)?,
 	Group: string,
 	Base: { Instance },
+	Extents: Vector3?,
+	Margin: number,
+	Size: Vector3,
 }
 
 const STEP_INTERVAL: number = 1 / 20
-const IDLE_EPSILON: number = 0.01
+const IDLE_EPSILON_SQ: number = 0.01 * 0.01
 const JUMP_POWER_SCALE: number = 1.06
 const JUMP_VELOCITY_TOLERANCE: number = 1.25
 const GROUND_EXTRA_DISTANCE: number = 2
@@ -65,6 +68,7 @@ const SPEED_DECAY: number = 1
 const MAX_BONUS: number = 500
 const NoclipIgnoreTag: string = "ChronoNoclipIgnore"
 const NoclipMinTravel: number = 0.05
+const NoclipMinTravelSq: number = NoclipMinTravel * NoclipMinTravel
 const NoclipMaxTravel: number = 1024
 const NoclipMinExtent: number = 0.05
 const NoclipTouchEpsilon: number = 0.001
@@ -73,9 +77,10 @@ const NoclipMaxCasts: number = 4
 const States: { [Entity]: State } = setmetatable({}, { __mode = "k" }) :: any
 const Overrides: { [Entity]: Override } = setmetatable({}, { __mode = "k" }) :: any
 const ClipCaches: { [Entity]: ClipCache } = setmetatable({}, { __mode = "k" }) :: any
+const ModelKinds: { [Instance]: number } = setmetatable({}, { __mode = "k" }) :: any
 
 const ViolatedSignal =
-	Signal.new() :: Types.Signal<(player: Player, entity: Entity, kind: string, excess: number) -> (), Player, Entity, string, number>
+	Signal.new() :: Types.Signal<(Player: Player, Target: Entity, Kind: string, Excess: number) -> (), Player, Entity, string, number>
 
 local MODE: string = "NONE"
 local SPEED_TOLERANCE: number = 1.5
@@ -84,146 +89,147 @@ local MIN_BANK: number = 12
 local AIR_MARGIN: number = 4
 local NoclipEnabled: boolean = true
 local NoclipMargin: number = 0.3
-local lastStep: number = 0
+local LastStep: number = 0
 
 const Rollback = {}
 
-const function Observe(entity: Entity): CFrame?
-	if entity.modelReplicationMode == "NATIVE" and not entity._lockedCFReplication then
-		const part: BasePart? = Entity.GetPrimaryPart(entity)
-		if part then
-			return part.CFrame
+const function ResolveRoot(Target: Entity): BasePart?
+	const Model: (Model | BasePart)? = Target.model
+	if not Model then
+		return nil
+	end
+	local Kind: number? = ModelKinds[Model]
+	if not Kind then
+		Kind = if Model:IsA("BasePart") then 1 elseif Model:IsA("Model") then 2 else 0
+		ModelKinds[Model] = Kind
+	end
+	if Kind == 1 then
+		return Model :: BasePart
+	end
+	if Kind == 2 then
+		if Target._chronoPrimary then
+			return Entity.GetPrimaryPart(Target)
 		end
+		return (Model :: Model).PrimaryPart
 	end
-	return entity.latestCFrame
+	return nil
 end
 
-const function GetHumanoid(entity: Entity, state: State): Humanoid?
-	const cached: Humanoid? = state.humanoid
-	if cached and cached.Parent then
-		return cached
+const function Observe(Target: Entity): (CFrame?, BasePart?, boolean)
+	if Target.modelReplicationMode == "NATIVE" and not Target._lockedCFReplication then
+		const Part: BasePart? = ResolveRoot(Target)
+		if Part then
+			return Part.CFrame, Part, true
+		end
+		return Target.latestCFrame, nil, true
 	end
-	const model: (Model | BasePart)? = entity.model
-	local humanoid: Humanoid? = nil
-	if model and model:IsA("Model") then
-		humanoid = model:FindFirstChildWhichIsA("Humanoid")
-	end
-	state.humanoid = humanoid
-	state.params = nil
-	return humanoid
+	return Target.latestCFrame, nil, false
 end
 
-const function GetParams(entity: Entity, state: State): RaycastParams
-	const existing: RaycastParams? = state.params
-	if existing then
-		return existing
+const function GetHumanoid(Target: Entity, State: State): Humanoid?
+	const Cached: Humanoid? = State.Humanoid
+	if Cached and Cached.Parent then
+		return Cached
 	end
-	const params: RaycastParams = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = if entity.model then { entity.model } else {}
-	state.params = params
-	return params
-end
-
-const function GetSupport(entity: Entity, state: State, humanoid: Humanoid, position: Vector3): BasePart?
-	const root: BasePart? = Entity.GetPrimaryPart(entity)
-	const rootHalf: number = if root then root.Size.Y / 2 else 1
-	const distance: number = math.max(humanoid.HipHeight, MIN_HIP_HEIGHT) + rootHalf + GROUND_EXTRA_DISTANCE
-	const result: RaycastResult? = workspace:Raycast(position, Vector3.new(0, -distance, 0), GetParams(entity, state))
-	return if result then result.Instance :: BasePart else nil
-end
-
-const function GetJumpVelocity(humanoid: Humanoid): number
-	if humanoid.UseJumpPower then
-		return humanoid.JumpPower * JUMP_POWER_SCALE
+	const Model: (Model | BasePart)? = Target.model
+	local Humanoid: Humanoid? = nil
+	if Model and Model:IsA("Model") then
+		Humanoid = Model:FindFirstChildWhichIsA("Humanoid")
 	end
-	return math.sqrt(2 * workspace.Gravity * humanoid.JumpHeight)
+	State.Humanoid = Humanoid
+	State.Params = nil
+	return Humanoid
 end
 
-const function IsExempt(entity: Entity, humanoid: Humanoid?): boolean
-	if entity.mountParentId then
+const function GetParams(Target: Entity, State: State): RaycastParams
+	const Existing: RaycastParams? = State.Params
+	if Existing then
+		return Existing
+	end
+	const Params: RaycastParams = RaycastParams.new()
+	Params.FilterType = Enum.RaycastFilterType.Exclude
+	Params.FilterDescendantsInstances = if Target.model then { Target.model } else {}
+	State.Params = Params
+	return Params
+end
+
+const function GetSupport(Target: Entity, State: State, Humanoid: Humanoid, RootSize: Vector3?, Position: Vector3): BasePart?
+	const RootHalf: number = if RootSize then RootSize.Y / 2 else 1
+	const Distance: number = math.max(Humanoid.HipHeight, MIN_HIP_HEIGHT) + RootHalf + GROUND_EXTRA_DISTANCE
+	const Result: RaycastResult? = workspace:Raycast(Position, Vector3.new(0, -Distance, 0), GetParams(Target, State))
+	return if Result then Result.Instance :: BasePart else nil
+end
+
+const function GetJumpVelocity(Humanoid: Humanoid): number
+	if Humanoid.UseJumpPower then
+		return Humanoid.JumpPower * JUMP_POWER_SCALE
+	end
+	return math.sqrt(2 * workspace.Gravity * Humanoid.JumpHeight)
+end
+
+const function IsExempt(Target: Entity, Humanoid: Humanoid?): boolean
+	if Target.mountParentId then
 		return true
 	end
-	if humanoid then
-		return humanoid.Health <= 0 or humanoid.SeatPart ~= nil or humanoid.PlatformStand
+	if Humanoid then
+		return Humanoid.Health <= 0 or Humanoid.SeatPart ~= nil or Humanoid.PlatformStand
 	end
 	return false
 end
 
-const function Spend(bank: number, bonus: number, amount: number): (boolean, number, number)
-	if amount <= bank then
-		return true, bank - amount, bonus
-	end
-	const remaining = amount - bank
-	if remaining <= bonus then
-		return true, 0, bonus - remaining
-	end
-	return false, bank, bonus
-end
-
-const function Allow(excess: number, bonus: number): (boolean, number)
-	if excess <= 0 then
-		return true, bonus
-	end
-	if excess <= bonus then
-		return true, bonus - excess
-	end
-	return false, bonus
-end
-
-const function NewState(entity: Entity, cframe: CFrame, now: number): State
+const function NewState(Target: Entity, Frame: CFrame, Now: number): State
 	return {
-		time = now,
-		position = cframe.Position,
-		sweepFrom = cframe.Position,
-		safe = cframe,
-		safeTime = entity.latestTime or now,
-		setStamp = entity._setAt,
-		horizontal = MIN_BANK,
-		vertical = MIN_BANK,
-		speedPeak = 0,
-		idle = 0,
-		airTime = 0,
-		groundY = cframe.Position.Y,
-		lift = 0,
-		pendingUntil = 0,
-		reapply = false,
-		attempts = 0,
-		desynced = false,
+		Time = Now,
+		Position = Frame.Position,
+		SweepFrom = Frame.Position,
+		Safe = Frame,
+		SafeTime = Target.latestTime or Now,
+		SetStamp = Target._setAt,
+		Horizontal = MIN_BANK,
+		Vertical = MIN_BANK,
+		SpeedPeak = 0,
+		Idle = 0,
+		AirTime = 0,
+		GroundY = Frame.Position.Y,
+		Lift = 0,
+		PendingUntil = 0,
+		Reapply = false,
+		Attempts = 0,
+		Desynced = false,
 	}
 end
 
-const function Rebase(state: State, cframe: CFrame, time: number): ()
-	state.position = cframe.Position
-	state.sweepFrom = cframe.Position
-	state.safe = cframe
-	state.safeTime = time
-	state.pending = nil
-	state.reapply = false
-	state.attempts = 0
-	state.desynced = false
-	state.horizontal = MIN_BANK
-	state.vertical = MIN_BANK
-	state.idle = 0
-	state.airTime = 0
-	state.groundY = cframe.Position.Y
-	state.lift = 0
-	state.floor = nil
-	state.floorOffset = nil
+const function Rebase(State: State, Frame: CFrame, Time: number): ()
+	State.Position = Frame.Position
+	State.SweepFrom = Frame.Position
+	State.Safe = Frame
+	State.SafeTime = Time
+	State.Pending = nil
+	State.Reapply = false
+	State.Attempts = 0
+	State.Desynced = false
+	State.Horizontal = MIN_BANK
+	State.Vertical = MIN_BANK
+	State.Idle = 0
+	State.AirTime = 0
+	State.GroundY = Frame.Position.Y
+	State.Lift = 0
+	State.Floor = nil
+	State.FloorOffset = nil
 end
 
-const function Apply(entity: Entity, state: State, target: CFrame): ()
-	Entity.SetCFrame(entity, target)
-	Entity._SetPartCFrame(entity, target)
-	const part: BasePart? = Entity.GetPrimaryPart(entity)
-	if part then
-		part.AssemblyLinearVelocity = Vector3.zero
+const function Apply(Target: Entity, State: State, Goal: CFrame): ()
+	Entity.SetCFrame(Target, Goal)
+	Entity._SetPartCFrame(Target, Goal)
+	const Part: BasePart? = Entity.GetPrimaryPart(Target)
+	if Part then
+		Part.AssemblyLinearVelocity = Vector3.zero
 	end
-	state.setStamp = entity._setAt
+	State.SetStamp = Target._setAt
 end
 
-const function GetDelay(player: Player): number
-	return REAPPLY_INTERVAL + math.max(player:GetNetworkPing(), 0) * 2
+const function GetDelay(Player: Player): number
+	return REAPPLY_INTERVAL + math.max(Player:GetNetworkPing(), 0) * 2
 end
 
 const function IsPartDriven(Target: Entity): boolean
@@ -243,7 +249,15 @@ const function GetClipCache(Target: Entity, Root: BasePart): ClipCache
 		Params.IgnoreWater = true
 		const Base: { Instance } = if Model then { Model } else { Root }
 		Params.FilterDescendantsInstances = Base
-		Cache = { Params = Params, Model = Model, Group = Params.CollisionGroup, Base = Base }
+		Cache = {
+				Params = Params,
+				Model = Model,
+				Group = Params.CollisionGroup,
+				Base = Base,
+				Extents = nil,
+				Margin = 0,
+				Size = Vector3.zero,
+			}
 		ClipCaches[Target] = Cache
 	end
 	const Group: string = Root.CollisionGroup
@@ -270,7 +284,7 @@ const function GetIgnored(Hit: BasePart): { Instance }?
 		return nil
 	end
 	const Ignored: { Instance } = { Hit }
-	for _, Part in Hit:GetConnectedParts(true) do
+	for _, Part: BasePart in Hit:GetConnectedParts(true) do
 		if Part ~= Hit then
 			table.insert(Ignored, Part)
 		end
@@ -278,11 +292,7 @@ const function GetIgnored(Hit: BasePart): { Instance }?
 	return Ignored
 end
 
-const function Sweep(Target: Entity, From: Vector3, To: CFrame, Fallback: Vector3?): number?
-	const Root: BasePart? = Entity.GetPrimaryPart(Target)
-	if not Root then
-		return nil
-	end
+const function Sweep(Target: Entity, Root: BasePart, Extents: Vector3, From: Vector3, To: CFrame, Fallback: Vector3?): number?
 	local Origin: Vector3 = From
 	local Offset: Vector3 = To.Position - Origin
 	local Travel: number = Offset.Magnitude
@@ -292,13 +302,18 @@ const function Sweep(Target: Entity, From: Vector3, To: CFrame, Fallback: Vector
 
 	const Cache: ClipCache = GetClipCache(Target, Root)
 	const Params: RaycastParams = Cache.Params
-	const Inset: number = NoclipMargin * 2
-	const Extents: Vector3 = Root.Size
-	const Size: Vector3 = Vector3.new(
-		math.max(Extents.X - Inset, NoclipMinExtent),
-		math.max(Extents.Y - Inset, NoclipMinExtent),
-		math.max(Extents.Z - Inset, NoclipMinExtent)
-	)
+	local Size: Vector3 = Cache.Size
+	if Cache.Extents ~= Extents or Cache.Margin ~= NoclipMargin then
+		const Inset: number = NoclipMargin * 2
+		Size = Vector3.new(
+			math.max(Extents.X - Inset, NoclipMinExtent),
+			math.max(Extents.Y - Inset, NoclipMinExtent),
+			math.max(Extents.Z - Inset, NoclipMinExtent)
+		)
+		Cache.Extents = Extents
+		Cache.Margin = NoclipMargin
+		Cache.Size = Size
+	end
 
 	local Excluded: { Instance } = Cache.Base
 	local Dirty: boolean = false
@@ -352,372 +367,418 @@ const function Sweep(Target: Entity, From: Vector3, To: CFrame, Fallback: Vector
 end
 
 const function ClipsPending(Target: Entity, Pending: CFrame, Observed: CFrame, Reapply: boolean): boolean
-	return NoclipEnabled and Reapply and Sweep(Target, Pending.Position, Observed, nil) ~= nil
+	if not (NoclipEnabled and Reapply) then
+		return false
+	end
+	const Root: BasePart? = ResolveRoot(Target)
+	if not Root then
+		return false
+	end
+	return Sweep(Target, Root, Root.Size, Pending.Position, Observed, nil) ~= nil
 end
 
 const function Violate(
-	player: Player,
-	entity: Entity,
-	state: State,
-	cframe: CFrame,
-	now: number,
-	kind: string,
-	excess: number
+	Player: Player,
+	Target: Entity,
+	State: State,
+	Frame: CFrame,
+	Now: number,
+	Kind: string,
+	Excess: number
 ): ()
-	Warn.medium("Rollback:", player.Name, kind, excess)
-	ViolatedSignal:Fire(player, entity, kind, excess)
+	Warn.medium("Rollback:", Player.Name, Kind, Excess)
+	ViolatedSignal:Fire(Player, Target, Kind, Excess)
 	if MODE ~= "ENFORCE" then
-		if kind ~= "INVALID" then
-			Rebase(state, cframe, entity.latestTime or state.safeTime)
+		if Kind ~= "INVALID" then
+			Rebase(State, Frame, Target.latestTime or State.SafeTime)
 		end
 		return
 	end
-	const target: CFrame = state.safe
-	const safeTime: number = state.safeTime
-	const snapshot: Types.Snapshot<CFrame, Vector3>? = entity.snapshot
-	if snapshot then
-		snapshot:TrimAfter(safeTime)
+	const Goal: CFrame = State.Safe
+	const SafeTime: number = State.SafeTime
+	const Snapshot: Types.Snapshot<CFrame, Vector3>? = Target.snapshot
+	if Snapshot then
+		Snapshot:TrimAfter(SafeTime)
 	end
-	entity.latestTime = safeTime
-	Apply(entity, state, target)
-	Rebase(state, target, safeTime)
-	state.pending = target
-	state.pendingUntil = now + GetDelay(player)
-	state.reapply = true
-	state.attempts = 1
+	Target.latestTime = SafeTime
+	Apply(Target, State, Goal)
+	Rebase(State, Goal, SafeTime)
+	State.Pending = Goal
+	State.PendingUntil = Now + GetDelay(Player)
+	State.Reapply = true
+	State.Attempts = 1
 end
 
-const function SyncTeleport(entity: Entity, state: State, fallback: CFrame, now: number): ()
-	if entity._setAt == state.setStamp then
+const function SyncTeleport(Target: Entity, State: State, Fallback: CFrame, Now: number): ()
+	if Target._setAt == State.SetStamp then
 		return
 	end
-	state.setStamp = entity._setAt
-	state.pending = entity.latestCFrame or fallback
-	state.pendingUntil = now + TELEPORT_WINDOW
-	state.reapply = false
-	state.attempts = 0
+	State.SetStamp = Target._setAt
+	State.Pending = Target.latestCFrame or Fallback
+	State.PendingUntil = Now + TELEPORT_WINDOW
+	State.Reapply = false
+	State.Attempts = 0
 end
 
-const function Step(player: Player, entity: Entity, now: number): ()
-	const cframe: CFrame? = Observe(entity)
-	if not cframe then
-		States[entity] = nil
+const function Step(Player: Player, Target: Entity, Now: number): ()
+	const Frame: CFrame?, ObservedRoot: BasePart?, RootResolved: boolean = Observe(Target)
+	if not Frame then
+		States[Target] = nil
 		return
 	end
-	const state: State? = States[entity]
-	if not state then
-		States[entity] = NewState(entity, cframe, now)
+	const State: State? = States[Target]
+	if not State then
+		States[Target] = NewState(Target, Frame, Now)
 		return
 	end
 
-	const dt: number = now - state.time
-	state.time = now
-	const position: Vector3 = cframe.Position
+	const DeltaTime: number = Now - State.Time
+	State.Time = Now
+	const Position: Vector3 = Frame.Position
 
-	SyncTeleport(entity, state, cframe, now)
+	SyncTeleport(Target, State, Frame, Now)
 
-	const pending: CFrame? = state.pending
-	if pending then
-		const distance: number = (position - pending.Position).Magnitude
-		if distance <= ACCEPT_RADIUS and not ClipsPending(entity, pending, cframe, state.reapply) then
-			Rebase(state, cframe, entity.latestTime or state.safeTime)
-		elseif now >= state.pendingUntil then
-			if state.reapply then
-				state.pendingUntil = now + GetDelay(player)
-				if state.attempts < MAX_REAPPLY_ATTEMPTS then
-					state.attempts += 1
-				elseif not state.desynced then
-					state.desynced = true
-					ViolatedSignal:Fire(player, entity, "DESYNC", distance)
+	const Pending: CFrame? = State.Pending
+	if Pending then
+		const Distance: number = (Position - Pending.Position).Magnitude
+		if Distance <= ACCEPT_RADIUS and not ClipsPending(Target, Pending, Frame, State.Reapply) then
+			Rebase(State, Frame, Target.latestTime or State.SafeTime)
+		elseif Now >= State.PendingUntil then
+			if State.Reapply then
+				State.PendingUntil = Now + GetDelay(Player)
+				if State.Attempts < MAX_REAPPLY_ATTEMPTS then
+					State.Attempts += 1
+				elseif not State.Desynced then
+					State.Desynced = true
+					ViolatedSignal:Fire(Player, Target, "DESYNC", Distance)
 				end
-				Apply(entity, state, pending)
+				Apply(Target, State, Pending)
 			else
-				const grace: Override? = Overrides[entity]
-				const exempt: boolean = IsExempt(entity, GetHumanoid(entity, state))
-					or (grace ~= nil and now < grace.graceUntil)
-				if MODE == "ENFORCE" and not exempt then
-					state.reapply = true
-					state.attempts = 1
-					state.pendingUntil = now + GetDelay(player)
-					Apply(entity, state, pending)
+				const Grace: Override? = Overrides[Target]
+				const Exempt: boolean = IsExempt(Target, GetHumanoid(Target, State))
+					or (Grace ~= nil and Now < Grace.GraceUntil)
+				if MODE == "ENFORCE" and not Exempt then
+					State.Reapply = true
+					State.Attempts = 1
+					State.PendingUntil = Now + GetDelay(Player)
+					Apply(Target, State, Pending)
 				else
-					Rebase(state, cframe, entity.latestTime or state.safeTime)
+					Rebase(State, Frame, Target.latestTime or State.SafeTime)
 				end
 			end
 		end
 		return
 	end
 
-	const override: Override? = Overrides[entity]
-	const humanoid: Humanoid? = GetHumanoid(entity, state)
-	if (override and now < override.graceUntil) or IsExempt(entity, humanoid) then
-		Rebase(state, cframe, entity.latestTime or state.safeTime)
+	const Override: Override? = Overrides[Target]
+	const Humanoid: Humanoid? = GetHumanoid(Target, State)
+	if (Override and Now < Override.GraceUntil) or IsExempt(Target, Humanoid) then
+		Rebase(State, Frame, Target.latestTime or State.SafeTime)
 		return
 	end
 
-	local speed: number? = override and override.maxSpeed
-	if not speed and humanoid then
-		speed = humanoid.WalkSpeed
+	local Speed: number? = Override and Override.MaxSpeed
+	if not Speed and Humanoid then
+		Speed = Humanoid.WalkSpeed
 	end
-	if not speed then
-		Rebase(state, cframe, entity.latestTime or state.safeTime)
+	if not Speed then
+		Rebase(State, Frame, Target.latestTime or State.SafeTime)
 		return
 	end
 
-	const sum: number = position.X + position.Y + position.Z
-	if sum ~= sum or math.abs(sum) == math.huge then
-		Violate(player, entity, state, cframe, now, "INVALID", 0)
+	const Px: number, Py: number, Pz: number = Position.X, Position.Y, Position.Z
+	const Sum: number = Px + Py + Pz
+	if Sum ~= Sum or math.abs(Sum) == math.huge then
+		Violate(Player, Target, State, Frame, Now, "INVALID", 0)
 		return
 	end
 
-	state.speedPeak = math.max(speed, state.speedPeak * math.max(0, 1 - SPEED_DECAY * dt))
-	const rate: number = state.speedPeak * SPEED_TOLERANCE
-	const cap: number = rate * BANK_TIME + MIN_BANK
-	const horizontalBank: number = math.min(state.horizontal + rate * dt, cap)
-	const verticalBank: number = math.min(state.vertical + rate * dt, cap)
+	const SpeedPeak: number = math.max(Speed, State.SpeedPeak * math.max(0, 1 - SPEED_DECAY * DeltaTime))
+	State.SpeedPeak = SpeedPeak
+	const Rate: number = SpeedPeak * SPEED_TOLERANCE
+	const Cap: number = Rate * BANK_TIME + MIN_BANK
+	const HorizontalBank: number = math.min(State.Horizontal + Rate * DeltaTime, Cap)
+	const VerticalBank: number = math.min(State.Vertical + Rate * DeltaTime, Cap)
 
-	local floor: BasePart? = nil
-	local tethered = false
-	if humanoid then
-		floor = GetSupport(entity, state, humanoid, position)
-		const humanoidState: Enum.HumanoidStateType = humanoid:GetState()
-		tethered = humanoidState == Enum.HumanoidStateType.Climbing
-			or humanoidState == Enum.HumanoidStateType.Swimming
+	const SweepEnabled: boolean = NoclipEnabled and (MODE ~= "ENFORCE" or IsPartDriven(Target))
+	local Root: BasePart? = ObservedRoot
+	if not RootResolved and (Humanoid ~= nil or SweepEnabled) then
+		Root = ResolveRoot(Target)
+	end
+	const RootSize: Vector3? = if Root then Root.Size else nil
+
+	local Floor: BasePart? = nil
+	local Tethered: boolean = false
+	if Humanoid then
+		Floor = GetSupport(Target, State, Humanoid, RootSize, Position)
+		const HumanoidState: Enum.HumanoidStateType = Humanoid:GetState()
+		Tethered = HumanoidState == Enum.HumanoidStateType.Climbing
+			or HumanoidState == Enum.HumanoidStateType.Swimming
 	end
 
-	local carry: Vector3 = Vector3.zero
-	const previousFloor: BasePart? = state.floor
-	const floorOffset: Vector3? = state.floorOffset
-	if floor and floor == previousFloor and floorOffset then
-		carry = floor.CFrame:PointToWorldSpace(floorOffset) - state.position
+	const Previous: Vector3 = State.Position
+	const Sx: number, Sy: number, Sz: number = Previous.X, Previous.Y, Previous.Z
+	const Ux: number, Uy: number, Uz: number = Px - Sx, Py - Sy, Pz - Sz
+	local Cx: number, Cy: number, Cz: number = 0, 0, 0
+	const FloorCFrame: CFrame? = if Floor then Floor.CFrame else nil
+	const PreviousFloor: BasePart? = State.Floor
+	const FloorOffset: Vector3? = State.FloorOffset
+	if FloorCFrame and Floor == PreviousFloor and FloorOffset then
+		const World: Vector3 = FloorCFrame:PointToWorldSpace(FloorOffset)
+		Cx, Cy, Cz = World.X - Sx, World.Y - Sy, World.Z - Sz
 	end
 
-	const moved: number = (position - state.position).Magnitude
-	const delta: Vector3 = position - state.position - carry
-	const flat: number = if humanoid then Vector3.new(delta.X, 0, delta.Z).Magnitude else delta.Magnitude
-	const bonusActive: boolean = override ~= nil and now < override.bonusUntil
-	local bonus: number = if bonusActive and override then override.bonus else 0
+	const Dx: number, Dy: number, Dz: number = Ux - Cx, Uy - Cy, Uz - Cz
+	const Flat: number = if Humanoid then math.sqrt(Dx * Dx + Dz * Dz) else math.sqrt(Dx * Dx + Dy * Dy + Dz * Dz)
+	const BonusActive: boolean = Override ~= nil and Now < Override.BonusUntil
+	local Bonus: number = if BonusActive and Override then Override.Bonus else 0
 
-	const horizontalOk: boolean, nextHorizontal: number, horizontalBonus: number = Spend(horizontalBank, bonus, flat)
-	if not horizontalOk then
-		Violate(player, entity, state, cframe, now, "SPEED", flat - horizontalBank - bonus)
-		return
-	end
-	bonus = horizontalBonus
-
-	local nextVertical: number = verticalBank
-	const supported: boolean = humanoid == nil or floor ~= nil or tethered
-
-	if humanoid then
-		const gravity: number = workspace.Gravity
-		const launch: number = GetJumpVelocity(humanoid) * JUMP_VELOCITY_TOLERANCE + state.lift
-		const window: number = dt + state.idle
-		if tethered then
-			const ok: boolean, bank: number, remaining: number = Spend(verticalBank, bonus, math.abs(delta.Y))
-			if not ok then
-				Violate(player, entity, state, cframe, now, "CLIMB", math.abs(delta.Y) - verticalBank - bonus)
-				return
-			end
-			nextVertical = bank
-			bonus = remaining
+	local NextHorizontal: number
+	if Flat <= HorizontalBank then
+		NextHorizontal = HorizontalBank - Flat
+	else
+		const Remaining: number = Flat - HorizontalBank
+		if Remaining <= Bonus then
+			NextHorizontal = 0
+			Bonus -= Remaining
 		else
-			const rise: number = launch * window + AIR_MARGIN
-			const fall: number = (launch + gravity * state.airTime) * window + 0.5 * gravity * window * window + AIR_MARGIN
-			const riseOk: boolean, riseBonus: number = Allow(delta.Y - rise, bonus)
-			if not riseOk then
-				Violate(player, entity, state, cframe, now, "RISE", delta.Y - rise - bonus)
-				return
-			end
-			const fallOk: boolean, fallBonus: number = Allow(-delta.Y - fall, riseBonus)
-			if not fallOk then
-				Violate(player, entity, state, cframe, now, "FALL", -delta.Y - fall - riseBonus)
-				return
-			end
-			bonus = fallBonus
-			if not supported then
-				const airborne: number = state.airTime + dt
-				const apex: number = math.max(launch * airborne - 0.5 * gravity * airborne * airborne, 0)
-				const ceiling: number = state.groundY + apex + AIR_MARGIN
-				const flyOk: boolean, flyBonus: number = Allow(position.Y - ceiling, bonus)
-				if not flyOk then
-					Violate(player, entity, state, cframe, now, "FLY", position.Y - ceiling - bonus)
+			Violate(Player, Target, State, Frame, Now, "SPEED", Flat - HorizontalBank - Bonus)
+			return
+		end
+	end
+
+	local NextVertical: number = VerticalBank
+	const Supported: boolean = Humanoid == nil or Floor ~= nil or Tethered
+
+	if Humanoid then
+		const Gravity: number = workspace.Gravity
+		const Launch: number = GetJumpVelocity(Humanoid) * JUMP_VELOCITY_TOLERANCE + State.Lift
+		const Window: number = DeltaTime + State.Idle
+		if Tethered then
+			const Amount: number = math.abs(Dy)
+			if Amount <= VerticalBank then
+				NextVertical = VerticalBank - Amount
+			else
+				const Remaining: number = Amount - VerticalBank
+				if Remaining <= Bonus then
+					NextVertical = 0
+					Bonus -= Remaining
+				else
+					Violate(Player, Target, State, Frame, Now, "CLIMB", Amount - VerticalBank - Bonus)
 					return
 				end
-				bonus = flyBonus
 			end
-		end
-	end
-
-	if NoclipEnabled and (MODE ~= "ENFORCE" or IsPartDriven(entity)) then
-		if (position - state.sweepFrom).Magnitude >= NoclipMinTravel then
-			const Penetration: number? = Sweep(entity, state.sweepFrom, cframe, state.safe.Position)
-			if Penetration then
-				Violate(player, entity, state, cframe, now, "NOCLIP", Penetration)
+		else
+			const Rise: number = Launch * Window + AIR_MARGIN
+			const RiseExcess: number = Dy - Rise
+			if RiseExcess <= 0 then
+			elseif RiseExcess <= Bonus then
+				Bonus -= RiseExcess
+			else
+				Violate(Player, Target, State, Frame, Now, "RISE", RiseExcess - Bonus)
 				return
 			end
-			state.sweepFrom = position
+			const Fall: number = (Launch + Gravity * State.AirTime) * Window + 0.5 * Gravity * Window * Window + AIR_MARGIN
+			const FallExcess: number = -Dy - Fall
+			if FallExcess <= 0 then
+			elseif FallExcess <= Bonus then
+				Bonus -= FallExcess
+			else
+				Violate(Player, Target, State, Frame, Now, "FALL", FallExcess - Bonus)
+				return
+			end
+			if not Supported then
+				const Airborne: number = State.AirTime + DeltaTime
+				const Apex: number = math.max(Launch * Airborne - 0.5 * Gravity * Airborne * Airborne, 0)
+				const FlyExcess: number = Py - (State.GroundY + Apex + AIR_MARGIN)
+				if FlyExcess <= 0 then
+				elseif FlyExcess <= Bonus then
+					Bonus -= FlyExcess
+				else
+					Violate(Player, Target, State, Frame, Now, "FLY", FlyExcess - Bonus)
+					return
+				end
+			end
 		end
 	end
 
-	if override and bonusActive then
-		override.bonus = bonus
+	if SweepEnabled then
+		const Anchor: Vector3 = State.SweepFrom
+		const Wx: number, Wy: number, Wz: number = Px - Anchor.X, Py - Anchor.Y, Pz - Anchor.Z
+		if Wx * Wx + Wy * Wy + Wz * Wz >= NoclipMinTravelSq then
+			const Penetration: number? = if Root and RootSize
+				then Sweep(Target, Root, RootSize, Anchor, Frame, State.Safe.Position)
+				else nil
+			if Penetration then
+				Violate(Player, Target, State, Frame, Now, "NOCLIP", Penetration)
+				return
+			end
+			State.SweepFrom = Position
+		end
 	end
 
-	state.horizontal = nextHorizontal
-	state.vertical = nextVertical
-	state.position = position
-	state.floor = floor
-	state.floorOffset = if floor then floor.CFrame:PointToObjectSpace(position) else nil
-	state.idle = if moved < IDLE_EPSILON then math.min(state.idle + dt, BANK_TIME) else 0
+	if Override and BonusActive then
+		Override.Bonus = Bonus
+	end
 
-	if supported then
-		state.airTime = 0
-		state.groundY = position.Y
-		state.safe = cframe
-		state.safeTime = entity.latestTime or state.safeTime
-		state.lift = if floor then math.clamp(carry.Y / math.max(dt, 0.001), 0, rate) else 0
+	State.Horizontal = NextHorizontal
+	State.Vertical = NextVertical
+	State.Position = Position
+	State.Floor = Floor
+	State.FloorOffset = if FloorCFrame then FloorCFrame:PointToObjectSpace(Position) else nil
+	State.Idle = if Ux * Ux + Uy * Uy + Uz * Uz < IDLE_EPSILON_SQ then math.min(State.Idle + DeltaTime, BANK_TIME) else 0
+
+	if Supported then
+		State.AirTime = 0
+		State.GroundY = Py
+		State.Safe = Frame
+		State.SafeTime = Target.latestTime or State.SafeTime
+		State.Lift = if Floor then math.clamp(Cy / math.max(DeltaTime, 0.001), 0, Rate) else 0
 	else
-		state.airTime += dt
+		State.AirTime += DeltaTime
 	end
 end
 
 const function Update(): ()
-	const now: number = os.clock()
-	if now - lastStep < STEP_INTERVAL then
+	const Now: number = os.clock()
+	if Now - LastStep < STEP_INTERVAL then
 		return
 	end
-	lastStep = now
-	for player, owned in Holder._clientOwned do
-		if player.Parent == nil then
+	LastStep = Now
+	for Player: Player, Owned: { [Entity]: true } in Holder._clientOwned do
+		if Player.Parent == nil then
 			continue
 		end
-		for entity in owned do
-			if not entity.destroyed and entity.networkOwner == player then
-				Step(player, entity, now)
+		for Target: Entity in Owned do
+			if not Target.destroyed and Target.networkOwner == Player then
+				Step(Player, Target, Now)
 			end
 		end
 	end
 end
 
-const function GetOverride(entity: Entity): Override
-	const existing: Override? = Overrides[entity]
-	if existing then
-		return existing
+const function GetOverride(Target: Entity): Override
+	const Existing: Override? = Overrides[Target]
+	if Existing then
+		return Existing
 	end
-	const override: Override = { graceUntil = 0, bonus = 0, bonusUntil = 0 }
-	Overrides[entity] = override
-	return override
+	const Override: Override = { GraceUntil = 0, Bonus = 0, BonusUntil = 0 }
+	Overrides[Target] = Override
+	return Override
 end
 
-function Rollback.Exempt(entity: Entity, seconds: number): ()
-	assert(type(seconds) == "number" and seconds >= 0, "Chrono: Rollback.Exempt expected a non-negative number")
-	GetOverride(entity).graceUntil = os.clock() + seconds
+function Rollback.Exempt(Target: Entity, Seconds: number): ()
+	assert(type(Seconds) == "number" and Seconds >= 0, "Chrono: Rollback.Exempt expected a non-negative number")
+	GetOverride(Target).GraceUntil = os.clock() + Seconds
 end
 
-function Rollback.Grant(entity: Entity, studs: number): ()
-	assert(type(studs) == "number" and studs >= 0, "Chrono: Rollback.Grant expected a non-negative number")
-	const override: Override = GetOverride(entity)
-	const now: number = os.clock()
-	const current: number = if now < override.bonusUntil then override.bonus else 0
-	override.bonus = math.min(current + studs, MAX_BONUS)
-	override.bonusUntil = now + BANK_TIME + 1
+function Rollback.Grant(Target: Entity, Studs: number): ()
+	assert(type(Studs) == "number" and Studs >= 0, "Chrono: Rollback.Grant expected a non-negative number")
+	const Override: Override = GetOverride(Target)
+	const Now: number = os.clock()
+	const Current: number = if Now < Override.BonusUntil then Override.Bonus else 0
+	Override.Bonus = math.min(Current + Studs, MAX_BONUS)
+	Override.BonusUntil = Now + BANK_TIME + 1
 end
 
-function Rollback.SetMaxSpeed(entity: Entity, speed: number?): ()
-	assert(speed == nil or (type(speed) == "number" and speed >= 0), "Chrono: Rollback.SetMaxSpeed expected a non-negative number")
-	GetOverride(entity).maxSpeed = speed
+function Rollback.SetMaxSpeed(Target: Entity, Speed: number?): ()
+	assert(Speed == nil or (type(Speed) == "number" and Speed >= 0), "Chrono: Rollback.SetMaxSpeed expected a non-negative number")
+	GetOverride(Target).MaxSpeed = Speed
 end
 
-const function Gate(player: Player, entity: Entity, state: State, cframe: CFrame, now: number): boolean
-	const override: Override? = Overrides[entity]
-	if override and now < override.graceUntil then
+const function Gate(Player: Player, Target: Entity, State: State, Frame: CFrame, Now: number): boolean
+	const Override: Override? = Overrides[Target]
+	if Override and Now < Override.GraceUntil then
 		return false
 	end
-	const humanoid: Humanoid? = GetHumanoid(entity, state)
-	if IsExempt(entity, humanoid) then
+	const Humanoid: Humanoid? = GetHumanoid(Target, State)
+	if IsExempt(Target, Humanoid) then
 		return false
 	end
-	local speed: number? = override and override.maxSpeed
-	if not speed and humanoid then
-		speed = humanoid.WalkSpeed
+	local Speed: number? = Override and Override.MaxSpeed
+	if not Speed and Humanoid then
+		Speed = Humanoid.WalkSpeed
 	end
-	if not speed then
+	if not Speed then
 		return false
 	end
 
-	const dt: number = math.max(now - state.time, 0)
-	const peak: number = math.max(speed, state.speedPeak * math.max(0, 1 - SPEED_DECAY * dt))
-	const rate: number = peak * SPEED_TOLERANCE
-	const cap: number = rate * BANK_TIME + MIN_BANK
-	const horizontalBank: number = math.min(state.horizontal + rate * dt, cap)
-	const bonus: number = if override and now < override.bonusUntil then override.bonus else 0
+	const DeltaTime: number = math.max(Now - State.Time, 0)
+	const Peak: number = math.max(Speed, State.SpeedPeak * math.max(0, 1 - SPEED_DECAY * DeltaTime))
+	const Rate: number = Peak * SPEED_TOLERANCE
+	const Cap: number = Rate * BANK_TIME + MIN_BANK
+	const HorizontalBank: number = math.min(State.Horizontal + Rate * DeltaTime, Cap)
+	const Bonus: number = if Override and Now < Override.BonusUntil then Override.Bonus else 0
 
-	local carry: Vector3 = Vector3.zero
-	const floor: BasePart? = state.floor
-	const floorOffset: Vector3? = state.floorOffset
-	if floor and floorOffset then
-		carry = floor.CFrame:PointToWorldSpace(floorOffset) - state.position
+	const Position: Vector3 = Frame.Position
+	const Px: number, Py: number, Pz: number = Position.X, Position.Y, Position.Z
+	const Previous: Vector3 = State.Position
+	const Sx: number, Sy: number, Sz: number = Previous.X, Previous.Y, Previous.Z
+	local Cx: number, Cy: number, Cz: number = 0, 0, 0
+	const Floor: BasePart? = State.Floor
+	const FloorOffset: Vector3? = State.FloorOffset
+	if Floor and FloorOffset then
+		const World: Vector3 = Floor.CFrame:PointToWorldSpace(FloorOffset)
+		Cx, Cy, Cz = World.X - Sx, World.Y - Sy, World.Z - Sz
 	end
 
-	const delta: Vector3 = cframe.Position - state.position - carry
-	const flat: number = if humanoid then Vector3.new(delta.X, 0, delta.Z).Magnitude else delta.Magnitude
-	if flat > horizontalBank + bonus then
-		Violate(player, entity, state, cframe, now, "SPEED", flat - horizontalBank - bonus)
+	const Dx: number, Dy: number, Dz: number = Px - Sx - Cx, Py - Sy - Cy, Pz - Sz - Cz
+	const Flat: number = if Humanoid then math.sqrt(Dx * Dx + Dz * Dz) else math.sqrt(Dx * Dx + Dy * Dy + Dz * Dz)
+	if Flat > HorizontalBank + Bonus then
+		Violate(Player, Target, State, Frame, Now, "SPEED", Flat - HorizontalBank - Bonus)
 		return true
 	end
 
-	if humanoid then
-		const verticalBank: number = math.min(state.vertical + rate * dt, cap)
-		const gravity: number = workspace.Gravity
-		const launch: number = GetJumpVelocity(humanoid) * JUMP_VELOCITY_TOLERANCE + state.lift
-		const window: number = dt + state.idle
-		const rise: number = launch * window + AIR_MARGIN
-		const fall: number = (launch + gravity * state.airTime) * window + 0.5 * gravity * window * window + AIR_MARGIN
-		const reach: number = math.max(rise, fall, verticalBank) + bonus
-		if math.abs(delta.Y) > reach then
-			Violate(
-				player,
-				entity,
-				state,
-				cframe,
-				now,
-				if delta.Y > 0 then "RISE" else "FALL",
-				math.abs(delta.Y) - reach
-			)
+	if Humanoid then
+		const VerticalBank: number = math.min(State.Vertical + Rate * DeltaTime, Cap)
+		const Gravity: number = workspace.Gravity
+		const Launch: number = GetJumpVelocity(Humanoid) * JUMP_VELOCITY_TOLERANCE + State.Lift
+		const Window: number = DeltaTime + State.Idle
+		const Rise: number = Launch * Window + AIR_MARGIN
+		const Fall: number = (Launch + Gravity * State.AirTime) * Window + 0.5 * Gravity * Window * Window + AIR_MARGIN
+		const Reach: number = math.max(Rise, Fall, VerticalBank) + Bonus
+		const AbsDy: number = math.abs(Dy)
+		if AbsDy > Reach then
+			Violate(Player, Target, State, Frame, Now, if Dy > 0 then "RISE" else "FALL", AbsDy - Reach)
 			return true
 		end
 	end
 
-	if NoclipEnabled and (cframe.Position - state.sweepFrom).Magnitude >= NoclipMinTravel then
-		const Penetration: number? = Sweep(entity, state.sweepFrom, cframe, state.safe.Position)
-		if Penetration then
-			Violate(player, entity, state, cframe, now, "NOCLIP", Penetration)
-			return true
+	if NoclipEnabled then
+		const Anchor: Vector3 = State.SweepFrom
+		const Wx: number, Wy: number, Wz: number = Px - Anchor.X, Py - Anchor.Y, Pz - Anchor.Z
+		if Wx * Wx + Wy * Wy + Wz * Wz >= NoclipMinTravelSq then
+			const Root: BasePart? = ResolveRoot(Target)
+			const Penetration: number? = if Root then Sweep(Target, Root, Root.Size, Anchor, Frame, State.Safe.Position) else nil
+			if Penetration then
+				Violate(Player, Target, State, Frame, Now, "NOCLIP", Penetration)
+				return true
+			end
+			State.SweepFrom = Position
 		end
-		state.sweepFrom = cframe.Position
 	end
 	return false
 end
 
-function Rollback.Filter(player: Player, entity: Entity, cframe: CFrame, now: number): boolean
+function Rollback.Filter(Player: Player, Target: Entity, Frame: CFrame, Now: number): boolean
 	if MODE ~= "ENFORCE" then
 		return false
 	end
-	const state: State? = States[entity]
-	if not state or entity.mountParentId then
+	const State: State? = States[Target]
+	if not State or Target.mountParentId then
 		return false
 	end
-	SyncTeleport(entity, state, state.safe, now)
-	const pending: CFrame? = state.pending
-	if pending then
-		return (cframe.Position - pending.Position).Magnitude > ACCEPT_RADIUS
-			or ClipsPending(entity, pending, cframe, state.reapply)
+	SyncTeleport(Target, State, State.Safe, Now)
+	const Pending: CFrame? = State.Pending
+	if Pending then
+		return (Frame.Position - Pending.Position).Magnitude > ACCEPT_RADIUS
+			or ClipsPending(Target, Pending, Frame, State.Reapply)
 	end
-	return Gate(player, entity, state, cframe, now)
+	return Gate(Player, Target, State, Frame, Now)
 end
 
-function Rollback.Reset(entity: Entity): ()
-	States[entity] = nil
+function Rollback.Reset(Target: Entity): ()
+	States[Target] = nil
 end
 
 Rollback.Violated = ViolatedSignal.Event
