@@ -68,43 +68,54 @@ const function GetLatest<Value, Velocity>(self: Snapshot<Value, Velocity>): Snap
 end
 
 const function Push<Value, Velocity>(self: Snapshot<Value, Velocity>, timeStamp: number, value: Value, velocity: Velocity)
-	const newData = { t = timeStamp, value = value, velocity = velocity }
+	const cache = self.cache
+	const count = self.count
+	const head = self.head
 
-	if self.count == 0 then
-		self.cache[self.head] = newData
+	if count == 0 then
+		const slot = cache[head]
+		slot.t = timeStamp
+		slot.value = value
+		slot.velocity = velocity
 		self.count = 1
 		return
 	end
 
-	const insertionPos = BinarySearchInsertionPoint(self, timeStamp)
+	local insertionPos: number
+	if cache[GetBufferIndex(head, count)].t < timeStamp then
+		insertionPos = count + 1
+	else
+		insertionPos = BinarySearchInsertionPoint(self, timeStamp)
+	end
 
-	if insertionPos > self.count then
-		if self.count < MAX_LENGTH then
-			const newIndex = GetBufferIndex(self.head, self.count + 1)
-			self.cache[newIndex] = newData
-			self.count += 1
+	if insertionPos > count then
+		if count < MAX_LENGTH then
+			const slot = cache[GetBufferIndex(head, count + 1)]
+			slot.t = timeStamp
+			slot.value = value
+			slot.velocity = velocity
+			self.count = count + 1
 		else
-			const newIndex = self.head
-			self.cache[newIndex] = newData
-			self.head = self.head % MAX_LENGTH + 1
+			const slot = cache[head]
+			slot.t = timeStamp
+			slot.value = value
+			slot.velocity = velocity
+			self.head = head % MAX_LENGTH + 1
 		end
 	else
-		if self.count < MAX_LENGTH then
-			ShiftElementsRight(self, insertionPos, self.count)
-			const insertIndex = GetBufferIndex(self.head, insertionPos)
-			self.cache[insertIndex] = newData
-			self.count += 1
+		const newData = { t = timeStamp, value = value, velocity = velocity }
+		if count < MAX_LENGTH then
+			ShiftElementsRight(self, insertionPos, count)
+			cache[GetBufferIndex(head, insertionPos)] = newData
+			self.count = count + 1
 		else
 			if insertionPos == 1 then
 				return
 			end
 			for i = 1, insertionPos - 2 do
-				const fromIndex = GetBufferIndex(self.head, i + 1)
-				const toIndex = GetBufferIndex(self.head, i)
-				self.cache[toIndex] = self.cache[fromIndex]
+				cache[GetBufferIndex(head, i)] = cache[GetBufferIndex(head, i + 1)]
 			end
-			const insertIndex = GetBufferIndex(self.head, insertionPos - 1)
-			self.cache[insertIndex] = newData
+			cache[GetBufferIndex(head, insertionPos - 1)] = newData
 		end
 	end
 end
@@ -183,7 +194,23 @@ const function GetAt<Value, Velocity>(self: Snapshot<Value, Velocity>, at: numbe
 		at = lockedTime
 	end
 
-	const insertionPos = BinarySearchInsertionPoint(self, at)
+	local insertionPos = 0
+	const hint = self.hint
+	if hint < count then
+		if cache[GetBufferIndex(head, hint)].t < at then
+			if cache[GetBufferIndex(head, hint + 1)].t >= at then
+				insertionPos = hint + 1
+			elseif hint + 1 < count and cache[GetBufferIndex(head, hint + 2)].t >= at then
+				insertionPos = hint + 2
+			end
+		end
+	end
+	if insertionPos == 0 then
+		insertionPos = BinarySearchInsertionPoint(self, at)
+	end
+	if insertionPos > 1 then
+		self.hint = insertionPos - 1
+	end
 
 	const beforePos = insertionPos - 1
 	const afterPos = insertionPos
@@ -239,6 +266,7 @@ const function Clear<Value, Velocity>(self: Snapshot<Value, Velocity>)
 	self.count = 0
 	self.lockedTime = 0
 	self.peakSpeed = 0
+	self.hint = 1
 	self.stoppedAt = nil
 end
 
@@ -254,6 +282,7 @@ const function New<Value, Velocity>(lerpFunction: (Value, Value, Velocity, Veloc
 		count = 0,
 		lockedTime = 0,
 		peakSpeed = 0,
+		hint = 1,
 		Lerp = lerpFunction,
 
 		Push = Push,
