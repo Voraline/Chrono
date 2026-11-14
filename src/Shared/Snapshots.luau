@@ -22,20 +22,20 @@ const function GetBufferIndex(head: number, relativeIndex: number): number
 end
 
 const function BinarySearchInsertionPoint<Value, Velocity>(self: Snapshot<Value, Velocity>, timeStamp: number): number
-	const count = self.count
+	const count: number = self.count
 	if count == 0 then
 		return 1
 	end
 
-	local left = 1
-	local right = count
-	const cache = self.cache
-	const head = self.head
+	local left: number = 1
+	local right: number = count
+	const cache: { SnapshotData<Value, Velocity> } = self.cache
+	const head: number = self.head
 
 	while left <= right do
-		const mid = (left + right) // 2
-		const bufferIndex = GetBufferIndex(head, mid)
-		const midTime = cache[bufferIndex].t
+		const mid: number = (left + right) // 2
+		const bufferIndex: number = GetBufferIndex(head, mid)
+		const midTime: number = cache[bufferIndex].t
 
 		if midTime < timeStamp then
 			left = mid + 1
@@ -48,12 +48,12 @@ const function BinarySearchInsertionPoint<Value, Velocity>(self: Snapshot<Value,
 end
 
 const function ShiftElementsRight<Value, Velocity>(self: Snapshot<Value, Velocity>, startPos: number, endPos: number)
-	const cache = self.cache
-	const head = self.head
+	const cache: { SnapshotData<Value, Velocity> } = self.cache
+	const head: number = self.head
 
 	for i = endPos, startPos, -1 do
-		const fromIndex = GetBufferIndex(head, i)
-		const toIndex = GetBufferIndex(head, i + 1)
+		const fromIndex: number = GetBufferIndex(head, i)
+		const toIndex: number = GetBufferIndex(head, i + 1)
 		cache[toIndex] = cache[fromIndex]
 	end
 end
@@ -63,14 +63,14 @@ const function GetLatest<Value, Velocity>(self: Snapshot<Value, Velocity>): Snap
 		return nil
 	end
 
-	const lastIndex = GetBufferIndex(self.head, self.count)
+	const lastIndex: number = GetBufferIndex(self.head, self.count)
 	return self.cache[lastIndex]
 end
 
 const function Push<Value, Velocity>(self: Snapshot<Value, Velocity>, timeStamp: number, value: Value, velocity: Velocity)
-	const cache = self.cache
-	const count = self.count
-	const head = self.head
+	const cache: { SnapshotData<Value, Velocity> } = self.cache
+	const count: number = self.count
+	const head: number = self.head
 
 	if count == 0 then
 		const slot = cache[head]
@@ -129,7 +129,7 @@ const function PushWithCheck<Value, Velocity>(
 	stopped: boolean?
 )
 	const latestData = GetLatest(self)
-	const isNewest = not latestData or timeStamp > latestData.t
+	const isNewest: boolean = not latestData or timeStamp > latestData.t
 	if stopped then
 		Push(self, timeStamp, value, vector.zero :: any)
 		if isNewest then
@@ -139,14 +139,14 @@ const function PushWithCheck<Value, Velocity>(
 	end
 
 	const position = (value :: any).Position
-	local teleported = false
+	local teleported: boolean = false
 	if latestData and isNewest and latestData.t == self.stoppedAt then
-		const moved = vector.magnitude(position - (latestData.value :: any).Position)
-		const gap = timeStamp - latestData.t
-		const travelTime = if self.peakSpeed > 1e-3 then moved / self.peakSpeed else 0
+		const moved: number = vector.magnitude(position - (latestData.value :: any).Position)
+		const gap: number = timeStamp - latestData.t
+		const travelTime: number = if self.peakSpeed > 1e-3 then moved / self.peakSpeed else 0
 
 		teleported = travelTime > tickrate * 5
-		const startAt = timeStamp - (if teleported then tickrate else math.max(tickrate, travelTime))
+		const startAt: number = timeStamp - (if teleported then tickrate else math.max(tickrate, travelTime))
 		if startAt > latestData.t and gap > tickrate * 1.5 then
 			Push(self, startAt, latestData.value, vector.zero :: any)
 		end
@@ -170,13 +170,13 @@ const function PushWithCheck<Value, Velocity>(
 end
 
 const function GetAt<Value, Velocity>(self: Snapshot<Value, Velocity>, at: number, bypassLock: boolean?): Value?
-	const count = self.count
+	const count: number = self.count
 	if count == 0 then
 		return nil
 	end
 
 	if count == 1 then
-		const index = GetBufferIndex(self.head, 1)
+		const index: number = GetBufferIndex(self.head, 1)
 		return self.cache[index].value
 	end
 
@@ -185,17 +185,17 @@ const function GetAt<Value, Velocity>(self: Snapshot<Value, Velocity>, at: numbe
 		return latest and latest.value or nil
 	end
 
-	const cache = self.cache
-	const head = self.head
+	const cache: { SnapshotData<Value, Velocity> } = self.cache
+	const head: number = self.head
 	const lerpFunction = self.Lerp
-	const lockedTime = self.lockedTime
+	const lockedTime: number = self.lockedTime
 
 	if at < lockedTime and not bypassLock then
 		at = lockedTime
 	end
 
-	local insertionPos = 0
-	const hint = self.hint
+	local insertionPos: number = 0
+	const hint: number = self.hint
 	if hint < count then
 		if cache[GetBufferIndex(head, hint)].t < at then
 			if cache[GetBufferIndex(head, hint + 1)].t >= at then
@@ -212,28 +212,28 @@ const function GetAt<Value, Velocity>(self: Snapshot<Value, Velocity>, at: numbe
 		self.hint = insertionPos - 1
 	end
 
-	const beforePos = insertionPos - 1
-	const afterPos = insertionPos
+	const beforePos: number = insertionPos - 1
+	const afterPos: number = insertionPos
 
 	local beforeData: SnapshotData<Value, Velocity>?
 	local afterData: SnapshotData<Value, Velocity>?
 
 	if beforePos >= 1 and beforePos <= count then
-		const beforeIndex = GetBufferIndex(head, beforePos)
+		const beforeIndex: number = GetBufferIndex(head, beforePos)
 		beforeData = cache[beforeIndex]
 	end
 
 	if afterPos >= 1 and afterPos <= count then
-		const afterIndex = GetBufferIndex(head, afterPos)
+		const afterIndex: number = GetBufferIndex(head, afterPos)
 		afterData = cache[afterIndex]
 	end
 
 	if beforeData and afterData then
-		const dt = afterData.t - beforeData.t
+		const dt: number = afterData.t - beforeData.t
 		if dt == 0 then
 			return beforeData.value
 		end
-		const alpha = (at - beforeData.t) / dt
+		const alpha: number = (at - beforeData.t) / dt
 
 		return lerpFunction(beforeData.value, afterData.value, beforeData.velocity, afterData.velocity, alpha, dt)
 	elseif beforeData then
@@ -248,8 +248,8 @@ const function GetAt<Value, Velocity>(self: Snapshot<Value, Velocity>, at: numbe
 end
 
 const function TrimAfter<Value, Velocity>(self: Snapshot<Value, Velocity>, time: number): ()
-	const cache = self.cache
-	const head = self.head
+	const cache: { SnapshotData<Value, Velocity> } = self.cache
+	const head: number = self.head
 	local count: number = self.count
 	while count > 0 and cache[GetBufferIndex(head, count)].t > time do
 		count -= 1
