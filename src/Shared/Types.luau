@@ -61,6 +61,7 @@ export type Snapshot<Value, Velocity> = {
 	count: number,
 	lockedTime: number,
 	peakSpeed: number,
+	hint: number, -- last GetAt bracket; always re-validated against timestamps, so it only affects speed
 	stoppedAt: number?, -- time of the newest snapshot if it is where the entity stopped
 	Lerp: (from: Value, to: Value, v0: Velocity, v1: Velocity, t: number, dt: number) -> Value,
 
